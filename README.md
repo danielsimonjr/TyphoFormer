@@ -10,31 +10,36 @@
 
 ---
 
-> **Official implementation of [TyphoFormer: Language-Augmented Transformer for Accurate Typhoon Track Forecasting](https://arxiv.org/abs/2506.17609)** (Li *et al.*, ACM SIGSPATIAL 2025) — winner of the 🏆 **Best Short Paper Award**. TyphoFormer augments a spatio-temporal Transformer with LLM-generated natural-language prompts that encode high-level meteorological semantics, fusing them into the numerical trajectory through a **Prompt-aware Gating Fusion (PGF)** module. On the **HURDAT2** benchmark it consistently outperforms classical (CLIPER) and deep-learning baselines (LSTM, GRU, Informer, Autoformer, TSMixer) across all 6 / 12 / 18 / 24-hour horizons, reaching a spherical-distance error of **31.5 km at 6 h** (≈12% lower than the strongest baseline) while holding its lead under nonlinear path shifts and sparse historical observations.
+> **Official implementation of [TyphoFormer: Language-Augmented Transformer for Accurate Typhoon Track Forecasting](https://arxiv.org/abs/2506.17609)** (Li *et al.*, ACM SIGSPATIAL 2025) — winner of the 🏆 **Best Short Paper Award**. TyphoFormer augments a spatio-temporal Transformer with LLM-generated natural-language prompts that encode high-level meteorological semantics, fusing them into the numerical trajectory through a **Prompt-aware Gating Fusion (PGF)** module. On the **HURDAT2** benchmark it attains the lowest error at *every* forecast horizon (6 / 12 / 18 / 24 h) — e.g. a 6-hour spherical-distance error of **31.5 km** and a 24-hour error of **49.6 km (≈15% below the strongest baseline)** — while degrading far more gracefully over long horizons and under nonlinear path shifts.
 
 **What is TyphoFormer?** For each time step, a Large Language Model turns raw numerical attributes — position, maximum sustained wind, central pressure, and wind radii — into a concise natural-language description; a sentence encoder embeds it, and the **PGF** module adaptively balances how much language context versus numerical signal to trust at each step. A spatio-temporal Transformer encoder then models long-range temporal dependencies before an autoregressive decoder rolls out future latitude/longitude coordinates.
 
-## 🫶 How to Cite:
-> If you find our work useful, please kindly cite our paper, thank you for your appreciation!
+## 📑 Table of Contents
 
-```
-@inproceedings{lityphoformer2025,
-author = {Li, Lincan and Ozguven, Eren Erman and Zhao, Yue and Wang, Guang and Xie, Yiqun and Dong, Yushun},
-title = {TyphoFormer: Language-Augmented Transformer for Accurate Typhoon Track Forecasting},
-booktitle={33rd ACM SIGSPATIAL International Conference on Advances in Geographic Information Systems (ACM SIGSPATIAL 2025)},
-location = {Minnesota, MN, USA},
-url = {https://doi.org/10.1145/3748636.3763223},
-year = {2025}
-}
-```
+- [✨ Highlights](#-highlights)
+- [🧠 Method](#-method)
+- [📊 Results](#-results)
+- [🚀 Quick Start](#-quick-start)
+- [📁 Repository Structure](#-repository-structure)
+- [🧩 Data Preparation](#-data-preparation)
+- [🔧 Configuration](#-configuration)
+- [📄 Citation](#-citation)
+- [🙏 Acknowledgements](#-acknowledgements)
+- [📜 License](#-license)
 
-## 🧭 1.Project Overview
-> TyphoFormer is a hybrid multi-modal Transformer designed for tropical cyclone (other names: Hurricane, Typhoon) track prediction. It integrates `numerical meteorological features` and `LLM-augmented language embeddings` through a Prompt-aware Gating Fusion (PGF) module, followed by a spatio-temporal Transformer backbone and autoregressive decoding for track forecasting.
+## ✨ Highlights
 
+- **🗣️ Language-augmented forecasting.** Injects per-step, LLM-generated meteorological *prompts* into typhoon-track modeling — supplying context that is inaccessible from numerical features alone.
+- **🚪 Prompt-aware Gating Fusion (PGF).** A learned sigmoid gate balances numerical vs. textual signals at *every* time step, rather than naively concatenating the two modalities.
+- **🧭 Spatio-temporal Transformer backbone.** Alternating temporal / spatial self-attention followed by an autoregressive decoding head that rolls out future coordinates.
+- **🏅 State of the art on HURDAT2.** Lowest MAE **and** spherical-distance error at all 6 / 12 / 18 / 24-hour horizons, with the smallest long-horizon degradation among all baselines.
+- **📦 Reproducible out of the box.** Ships 5 years of HURDAT2 records, the GPT-4o prompts, and the MiniLM embeddings — so you can train and evaluate immediately.
 
-## 🧠 2.Model Algorithm (Pseudocode)
+## 🧠 Method
 
-> The pseudocode below summarizes the full TyphoFormer pipeline. The LaTeX source (paper-style `algorithmicx`) is available in [`TyphoFormer_algorithm.tex`](TyphoFormer_algorithm.tex) for direct reuse in a paper.
+TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / hurricane) track prediction. It integrates `numerical meteorological features` and `LLM-augmented language embeddings` through a **Prompt-aware Gating Fusion (PGF)** module, followed by a spatio-temporal Transformer backbone and autoregressive decoding.
+
+> The pseudocode below summarizes the full pipeline. The LaTeX source (paper-style `algorithmicx`) is available in [`TyphoFormer_algorithm.tex`](TyphoFormer_algorithm.tex) for direct reuse in a paper.
 
 ### Training
 
@@ -116,115 +121,175 @@ flowchart TD
 
 **Reading the diagram.** Numerical features $x_t$ and the mean-pooled prompt vector $\bar{p}$ meet at the **PGF** block (green), where a sigmoid gate $g$ decides — per time step — how much of each modality to keep. The fused sequence $Z$ flows through the **spatio-temporal encoder** (yellow), whose alternating temporal/spatial attention yields the context vector $h_L$. The **autoregressive decoder** (red) unrolls $H$ steps, feeding each predicted coordinate back in, to produce the track $\hat{Y}$. During training, both the prediction and the gate $g$ feed the **objective** (purple) — MSE plus the gate-penalty regularizer — which is optimized with Adam.
 
+## 📊 Results
 
-## 🧱 3.Repository Structure
+Evaluation on **HURDAT2** (North Atlantic hurricane database; 6-hourly records, 22 meteorological features). Training uses 2004–2021; testing uses 2022–2024. We report **MAE** (mean absolute error, in degrees) and **ΔR** (spherical / great-circle distance error, in km) at 4 forecast horizons. Lower is better; **best per column in bold**.
+
+**Mean Absolute Error (MAE ↓)**
+
+| Model | 6 h | 12 h | 18 h | 24 h |
+|:--|:--:|:--:|:--:|:--:|
+| CLIPER | 0.235 | 0.275 | 0.310 | 0.368 |
+| GRU | 0.367 | 0.405 | 0.493 | 0.640 |
+| LSTM | 0.392 | 0.431 | 0.583 | 0.828 |
+| Informer | 0.289 | 0.318 | 0.392 | 0.483 |
+| Autoformer | 0.263 | 0.286 | 0.357 | 0.433 |
+| TSMixer | 0.214 | 0.268 | 0.297 | 0.353 |
+| **TyphoFormer** | **0.188** | **0.242** | **0.261** | **0.312** |
+
+**Spherical Distance Error (ΔR, km ↓)**
+
+| Model | 6 h | 12 h | 18 h | 24 h |
+|:--|:--:|:--:|:--:|:--:|
+| CLIPER | 34.265 | 42.205 | 51.632 | 58.268 |
+| GRU | 50.480 | 69.397 | 90.875 | 103.894 |
+| LSTM | 46.096 | 71.365 | 95.412 | 112.663 |
+| Informer | 37.592 | 46.435 | 56.433 | 76.684 |
+| Autoformer | 39.836 | 47.183 | 63.775 | 70.862 |
+| TSMixer | 35.720 | 45.265 | 50.330 | 62.910 |
+| **TyphoFormer** | **31.539** | **38.084** | **42.435** | **49.562** |
+
+TyphoFormer is best at every horizon and, crucially, degrades the least over time: its 24-hour ΔR of **49.6 km** is ~15% below the strongest baseline (CLIPER, 58.3 km) and ~35% below Informer (76.7 km). The gains persist on the held-out **2024** test year, confirming generalization to recent, unseen storms.
+
+<p align="center">
+  <img width="620" alt="Full experimental results (Table 1)" src="assets/Table1_Experimental_results.png">
+</p>
+
+**Case study — Hurricane MILTON (2024).** TyphoFormer tracks the early recurvature in the Gulf of Mexico, the Florida landfall curvature, and the post-landfall drift into the Atlantic more faithfully than recurrent and Transformer baselines, which tend to over-smooth these nonlinear segments.
+
+<p align="center">
+  <img width="520" alt="Hurricane MILTON 2024 track prediction" src="assets/MILTON_Track_Prediction.png">
+</p>
+
+## 🚀 Quick Start
+
+> 😄 A 5-year processed dataset is bundled with this repo, so you can train and evaluate right away.
+
+```bash
+# 1. Clone
+git clone https://github.com/LabRAI/TyphoFormer.git
+cd TyphoFormer
+
+# 2. Install dependencies (see "Environment" below)
+pip install "torch>=2.1.0" numpy pandas tqdm scikit-learn torchinfo \
+            transformers sentence-transformers openai backoff
+
+# 3. Unzip the bundled sample data
+unzip -o "data/train/train_part*.zip" -d data/train
+unzip -o "data/test/test.zip"         -d data/test
+
+# 4. Train, then evaluate
+python train_typhoformer.py     # checkpoints saved under ./checkpoints
+python eval_typhoformer.py
+```
+
+**Environment**
+
+| Package | Version | Used by |
+|:--|:--|:--|
+| `torch` | ≥ 2.1.0 | model, training |
+| `numpy`, `pandas` | — | data handling |
+| `tqdm` | — | progress bars |
+| `scikit-learn` | — | train/val/test split (`prepare_typhoformer_data.py`) |
+| `torchinfo` | — | model summary (imported by `model/STTransformer.py`) |
+| `sentence-transformers` | — | MiniLM text embeddings |
+| `transformers` | — | tokenizer / encoder backend |
+| `openai`, `backoff` | — | GPT-4o prompt generation (optional; only to regenerate text) |
+
+## 📁 Repository Structure
+
 ```bash
 TyphoFormer/
 ├── model/
-│   ├── STTransformer.py       # Spatio-Temporal backbone
+│   ├── STTransformer.py       # Spatio-temporal Transformer backbone
 │   ├── PGF_module.py          # Prompt-aware Gating Fusion module
-│   ├── TyphoFormer.py         # TyphoFormer model architecture
+│   └── TyphoFormer.py         # Full model (PGF + encoder + AR decoder)
 │
+├── data/                      # Processed typhoon datasets (.npy)
+│   ├── train/                 # train_part1.zip + train_part2.zip → unzip here
+│   ├── val/                   # ready-to-use .npy samples
+│   └── test/                  # test.zip → unzip here
 │
-├── data/                      # Processed Typhoon datasets in '.npy' files
-│   ├── train/                 # contains `train_part1.zip` and `train_part2.zip`. Unzip and put all `.npy` files under "train" folder directly.
-│   ├── val/
-│   └── test/                  # contains `test.zip`. Unzip to get all the `.npy` files.
-│
-├── embedding_chunks/          # LLM generated semantic descriptions are embeded by sentence-transformer
+├── embedding_chunks/          # MiniLM embeddings of the LLM descriptions
 │   ├── emb_chunk_000.npy
-│   ├── ......
-│   ├── emb_chunk_006.npy ...
+│   └── ... emb_chunk_006.npy
 │
-├── HURDAT_2new_3000.csv       # Raw typhoon dataset, includes 5 years' typhoon data here as an example
-├── generate_text_description_new.py   # GPT-based language generation
-├── generate_text_embeddings.py        # Embedding generation via MiniLM-L6-v2
-├── prepare_typhoformer_data.py        # Dataset preparation script
+├── assets/                    # Figures (results, algorithm diagrams, demo GIF)
+├── HURDAT_2new_3000.csv       # Raw typhoon records (2020–2024 sample)
+├── generate_text_description_new.py   # GPT-4o language-description generation
+├── generate_text_embeddings.py        # MiniLM (all-MiniLM-L6-v2) embedding generation
+├── prepare_typhoformer_data.py        # Dataset preparation (sliding windows)
 ├── train_typhoformer.py               # Training entry point
 ├── eval_typhoformer.py                # Evaluation script
+├── TyphoFormer_algorithm.tex          # Paper-style pseudocode (LaTeX)
 └── utils.py
 ```
 
-## ⚙️ 4. Environment Setup
-```
-torch >= 2.1.0
-transformers
-sentence-transformers
-openai
-tqdm
-pandas
-numpy
-```
+## 🧩 Data Preparation
 
-## 🧩 5. Data Preparation
+The bundled data is ready to use; follow these steps only to regenerate from raw records or bring your own.
 
-(1) Step 1: Use `generate_text_description_new.py` to create GPT-4o enhanced natural language descriptions for each typhoon record. (We already provided the generated language descriptions with this repository).
+1. **Generate descriptions** — run `generate_text_description_new.py` to create GPT-4o natural-language descriptions for each typhoon record. *(Pre-generated descriptions are already provided.)*
+2. **Embed text** — convert the descriptions to embeddings with `generate_text_embeddings.py` (model: `all-MiniLM-L6-v2`, 384-dim).
+3. **Build dataset** — combine numerical and textual embeddings into ready-to-use samples with `prepare_typhoformer_data.py`.
+4. **Output** — the final dataset is written to `data/{train,val,test}/*.npy`.
 
-(2) Step 2: Covert textual descriptions to embeddings using `generate_text_embeddings.py` (model: MiniLM).
+Each `.npy` file holds one sliding-window sample:
 
-(3) Step 3: Combine numerical and textual embeddings into ready-to-use dataset using `prepare_typhoformer_data.py`.
-
-(4) Step 4: The final dataset is stored under:
-```
-data/train/xxx.npy
-data/val/yyy.npy
-data/test/zzz.npy
-```
-### ❗️[NOTICE]
-
-- **In this repository, we already provide five-year ground-truth typhoon records from HURDAT2, and the corresponding GPT-4o generated language descriptions, as well as the MiniLM generated language embeddings for you to try. However, in our own experiments, we use over 20+ years' Typhoon records and LLM-generated natural language descriptions as our database.**
-
-- The raw numerical typhoon records from 2020-2024 is provided in `HURDAT_2new_3000.csv`
-- If you want to generate your own language context descriptions using GPTs, make sure you have a valid OpenAI API Key and put it in the `generate_text_description_new.py`.
-
-Each `.npy`file contains one piece of typhoon track record formatted as:
-```
+```python
 data = np.load(path, allow_pickle=True).item()
-X = data["input"]
-Y = data["target"]
+X = data["input"]    # (INPUT_LEN, D_NUM + D_TEXT) numerical + language features
+Y = data["target"]   # (PRED_LEN, 2) future (lat, lon)
 ```
 
-## 🚀 6.Training and Evaluation
+> **❗️ Note.** This repo ships 5 years of HURDAT2 ground-truth records (`HURDAT_2new_3000.csv`, 2020–2024) with the matching GPT-4o descriptions and MiniLM embeddings, as an example. The results in the paper use **20+ years** of records. To generate your own descriptions, set a valid OpenAI API key in `generate_text_description_new.py`.
 
-> 😄 We alrdeay provided a 5-year processed data, which can directly used for model training, so that you can run model training and evaluation directly. 
+<p align="center">
+  <img src="assets/test_code_visualization.gif" alt="TyphoFormer training/evaluation demo" width="800">
+</p>
 
-```bash
-# Train
-python train_typhoformer.py
+## 🔧 Configuration
 
-# Evaluate
-python eval_typhoformer.py
+Training and model hyperparameters can be adjusted at the top of `train_typhoformer.py`:
 
-```
->Training logs will be saved automatically under /checkpoints.
-> You can adjust model training-related configurations in `train_typhoformer.py`:
-```bash
+```python
 # <Adjustable Configurations>
-DATA_DIR = "data"
-TRAIN_DIR = os.path.join(DATA_DIR, "train")
-VAL_DIR = os.path.join(DATA_DIR, "val")
-SAVE_DIR = "checkpoints"
+DATA_DIR   = "data"
+SAVE_DIR   = "checkpoints"
 
 BATCH_SIZE = 8
 NUM_EPOCHS = 100
-LR = 1e-4
+LR         = 1e-4
 WEIGHT_DECAY = 1e-5
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-INPUT_LEN = 12
-PRED_LEN = 1
-D_NUM = 14
-D_TEXT = 384 #dim of language embedding (all-MiniLM-L6-v2）
+DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
+
+INPUT_LEN  = 12     # historical time steps used as input
+PRED_LEN   = 1      # time steps to predict
+D_NUM      = 14     # numerical feature dimension (adjust to your CSV)
+D_TEXT     = 384    # language embedding dimension (all-MiniLM-L6-v2)
 ```
 
-<p align="center">
-  <img src="https://github.com/LabRAI/TyphoFormer/blob/main/assets/test_code_visualization.gif" alt="code demo" width="800">
-</p>
+Training logs and the best checkpoint (`best_model.pt`) are saved automatically under `./checkpoints`.
 
+## 📄 Citation
 
-## 📊 7.Performance Results
-<img width="600" alt="image" src="https://github.com/LabRAI/TyphoFormer/blob/main/assets/Table1_Experimental_results.png">
+If you find our work useful, please consider citing:
 
+```bibtex
+@inproceedings{lityphoformer2025,
+  author    = {Li, Lincan and Ozguven, Eren Erman and Zhao, Yue and Wang, Guang and Xie, Yiqun and Dong, Yushun},
+  title     = {TyphoFormer: Language-Augmented Transformer for Accurate Typhoon Track Forecasting},
+  booktitle = {33rd ACM SIGSPATIAL International Conference on Advances in Geographic Information Systems (ACM SIGSPATIAL 2025)},
+  location  = {Minneapolis, MN, USA},
+  url       = {https://doi.org/10.1145/3748636.3763223},
+  year      = {2025}
+}
+```
 
-<img width="500" alt="image" src="https://github.com/LabRAI/TyphoFormer/blob/main/assets/MILTON_Track_Prediction.png">
+## 🙏 Acknowledgements
 
+This work is supported in part by the start-up grant and the FYAP grant program provided by Florida State University. Experiments use the [HURDAT2](https://www.nhc.noaa.gov/data/#hurdat) database maintained by the U.S. National Hurricane Center.
 
+## 📜 License
+
+No formal license file is currently included in this repository. The code and data are shared for **academic, non-commercial research**; please contact the authors regarding other uses.
