@@ -87,39 +87,49 @@ TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / 
 
 The diagram below renders the same two algorithms as a single end-to-end data flow — from raw records to the optimizer — with each stage color-coded by module.
 
+<p align="center">
+  <picture>
+    <source srcset="assets/dataflow_diagram.svg" type="image/svg+xml">
+    <img src="assets/dataflow_diagram.png" alt="TyphoFormer end-to-end data-flow diagram: language-context prep, PGF fusion, spatio-temporal encoder, autoregressive decoder, and training objective" width="540">
+  </picture>
+</p>
+
+<details>
+<summary>Mermaid source (click to expand / edit)</summary>
+
 ```mermaid
 flowchart TD
     subgraph PREP["Phase 1 · Language Context (offline, cached)"]
         R["Typhoon record x_t"] --> G["GPT-4o<br/>semantic prompt"]
         G --> TE["Sentence encoder<br/>all-MiniLM-L6-v2"]
-        TE --> MP["Mean-pool tokens<br/>p&#772; = (1/M) &#931; p_m"]
+        TE --> MP["Mean-pool tokens<br/>p_mean = (1/M) Σ p_m"]
     end
 
     X["Numerical features x_t"] --> CAT
     MP --> CAT
 
     subgraph PGF["Prompt-aware Gating Fusion (PGF)"]
-        CAT["Concat [x_t ; p&#772;]"] --> GATE["Gate<br/>g = &#963;(W_g[x_t;p&#772;] + b_g)"]
-        GATE --> BLEND["x&#771;_t = g &#8857; W_x x_t<br/>+ (1 &#8722; g) &#8857; W_p p&#772;"]
+        CAT["Concat [x_t ; p_mean]"] --> GATE["Gate<br/>g = σ(W_g[x_t; p_mean] + b_g)"]
+        GATE --> BLEND["x_fused = g ⊙ W_x x_t<br/>+ (1 − g) ⊙ W_p p_mean"]
     end
 
-    subgraph ENC["Spatio-Temporal Transformer Encoder (x N_layers)"]
+    subgraph ENC["Spatio-Temporal Transformer Encoder (× N_layers)"]
         IP["Input projection"] --> TA["Temporal self-attention"]
         TA --> SA["Spatial self-attention"]
         SA --> HL["Context vector h_L"]
     end
 
     subgraph DEC["Autoregressive Decoder (h = 1..H)"]
-        LOOP["z = [h_L ; y_prev]<br/>y = W_2 ReLU(W_1 z)<br/>feed y back as y_prev"] --> YHAT["Predicted track Y&#770; (lat, lon)"]
+        LOOP["z = [h_L ; y_prev]<br/>y = W_2 ReLU(W_1 z)<br/>feed y back as y_prev"] --> YHAT["Predicted track Ŷ (lat, lon)"]
     end
 
-    BLEND -->|"Z = x&#771;_1..x&#771;_L"| IP
+    BLEND -->|"Z = x_fused_1 .. x_fused_L"| IP
     HL --> LOOP
     YSEED["Last observed coord y_prev"] --> LOOP
 
-    YHAT --> LOSS["Loss = MSE(Y&#770;, Y)<br/>+ &#955;_g (max(0, &#964; &#8722; g))&#178;"]
+    YHAT --> LOSS["Loss = MSE(Ŷ, Y)<br/>+ λ_g (max(0, τ − g))²"]
     GATE -.->|"gate g"| LOSS
-    LOSS --> OPT["Adam update &#966;"]
+    LOSS --> OPT["Adam update φ"]
 
     classDef prep fill:#eef6ff,stroke:#4a90d9,color:#0b3d66;
     classDef fuse fill:#eafaf1,stroke:#27ae60,color:#145a32;
@@ -132,6 +142,8 @@ flowchart TD
     class LOOP,YHAT dec;
     class LOSS,OPT train;
 ```
+
+</details>
 
 **Reading the diagram.** Numerical features `x_t` and the mean-pooled prompt vector `p̄` meet at the **PGF** block (green), where a sigmoid gate `g` decides — per time step — how much of each modality to keep. The fused sequence `Z` flows through the **spatio-temporal encoder** (yellow), whose alternating temporal/spatial attention yields the context vector `h_L`. The **autoregressive decoder** (red) unrolls `H` steps, feeding each predicted coordinate back in, to produce the track `Ŷ`. During training, both the prediction and the gate `g` feed the **objective** (purple) — MSE plus the gate-penalty regularizer — which is optimized with Adam.
 
