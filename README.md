@@ -7,6 +7,7 @@
 ![Award](https://img.shields.io/badge/Best%20Short%20Paper-Award-e3a008)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/)
 ![Python](https://img.shields.io/badge/Python-3.8+-3776ab?logo=python&logoColor=white)
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 
 ---
 
@@ -318,4 +319,6 @@ This work is supported in part by the start-up grant and the FYAP grant program 
 
 ## 📜 License
 
-No formal license file is currently included in this repository. The code and data are shared for **academic, non-commercial research**; please contact the authors regarding other uses.
+Released into the public domain under [The Unlicense](LICENSE) — the most permissive option, placing no restrictions on use, modification, or distribution (no attribution required).
+
+> **Note.** This repository is a fork; the upstream project and the associated paper remain the work of the original authors (Li *et al.*). The public-domain dedication here covers this repository's contents — if you build on it, check the upstream repository for any conflicting terms.
