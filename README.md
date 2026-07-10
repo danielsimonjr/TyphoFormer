@@ -7,7 +7,7 @@
 ![Award](https://img.shields.io/badge/Best%20Short%20Paper-Award-e3a008)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/)
 ![Python](https://img.shields.io/badge/Python-3.8+-3776ab?logo=python&logoColor=white)
-[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
+[![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 ---
 
@@ -319,6 +319,6 @@ This work is supported in part by the start-up grant and the FYAP grant program 
 
 ## 📜 License
 
-Released into the public domain under [The Unlicense](LICENSE) — the most permissive option, placing no restrictions on use, modification, or distribution (no attribution required).
+Released under the [MIT No Attribution (MIT-0)](LICENSE) license — a maximally permissive, OSI-approved license allowing unrestricted use, modification, and distribution with **no attribution requirement**.
 
-> **Note.** This repository is a fork; the upstream project and the associated paper remain the work of the original authors (Li *et al.*). The public-domain dedication here covers this repository's contents — if you build on it, check the upstream repository for any conflicting terms.
+> **Note.** This repository is a fork; the upstream project and the associated paper remain the work of the original authors (Li *et al.*). The MIT-0 grant here covers this repository's contents — if you build on it, check the upstream repository for any conflicting terms.
