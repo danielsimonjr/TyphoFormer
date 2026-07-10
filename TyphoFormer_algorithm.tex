@@ -1,0 +1,130 @@
+% =============================================================================
+% TyphoFormer: Language-Augmented Transformer for Typhoon Track Forecasting
+% Paper-style pseudocode, inferred from the reference implementation.
+%
+% Required preamble packages:
+%   \usepackage{algorithm}
+%   \usepackage{algpseudocode}   % algorithmicx
+%   \usepackage{amsmath,amssymb}
+%
+% The two algorithms below can be dropped directly into a paper. Algorithm 1
+% is the end-to-end training procedure; Algorithm 2 is the model forward pass
+% (PGF fusion -> spatio-temporal encoder -> autoregressive decoder) that it
+% calls. Notation follows Sec. 2 of the paper.
+% =============================================================================
+
+% --- convenience macros (place in preamble; optional) -----------------------
+\newcommand{\xnum}{\mathbf{x}}          % numerical meteorological feature vector
+\newcommand{\ptok}{\mathbf{p}}          % prompt token embedding
+\newcommand{\pmean}{\bar{\mathbf{p}}}   % mean-pooled prompt embedding
+\newcommand{\xfuse}{\tilde{\mathbf{x}}} % PGF-fused representation
+\newcommand{\hstate}{\mathbf{h}}        % encoder hidden state
+\newcommand{\ypred}{\hat{\mathbf{y}}}   % predicted coordinate
+\newcommand{\Wg}{\mathbf{W}_g}
+\newcommand{\bg}{\mathbf{b}_g}
+\newcommand{\sig}{\sigma}
+\newcommand{\hadamard}{\odot}
+
+% =============================================================================
+% ALGORITHM 1 : Training
+% =============================================================================
+\begin{algorithm}[t]
+\caption{TyphoFormer: Training for Typhoon Track Forecasting}
+\label{alg:typhoformer-train}
+\begin{algorithmic}[1]
+\Require Raw trajectories $\{\mathcal{S}_k\}$; input length $L$; horizon $H$;
+         epochs $E$; learning rate $\eta$; gate-penalty weight $\lambda_g$,
+         target $\tau$
+\Ensure  Learned parameters $\phi = \{\Wg,\bg,\mathbf{W}_x,\mathbf{W}_p,
+         \text{Enc}, \text{Dec}\}$
+
+\Statex \textbf{// Phase 1: Offline language-context preparation (cached)}
+\ForAll{records $r$ in all trajectories}
+  \State $\text{desc}_r \gets \textsc{LLM-Describe}(r)$
+         \Comment{GPT-4o semantic prompt from numerical record}
+  \State $P_r = \{\ptok_1,\dots,\ptok_M\} \gets \textsc{TextEncoder}(\text{desc}_r)$
+         \Comment{Sentence/BERT encoder, $\ptok_m\in\mathbb{R}^{d_p}$}
+  \State $\pmean_r \gets \frac{1}{M}\sum_{m=1}^{M}\ptok_m$
+         \Comment{mean-pooled prompt representation}
+\EndFor
+
+\Statex \textbf{// Phase 2: Sliding-window sample construction}
+\State $\mathcal{D}\gets\emptyset$
+\ForAll{trajectory $\mathcal{S}_k=\{(\xnum_t,\pmean_t)\}_{t=1}^{T_k}$}
+  \For{$i \gets 1$ \textbf{to} $T_k-L-H+1$}
+    \State $\mathbf{X}\gets\{(\xnum_t,\pmean_t)\}_{t=i}^{i+L-1}$,\quad
+           $\mathbf{Y}\gets\{(\varphi_t,\lambda_t)\}_{t=i+L}^{i+L+H-1}$
+    \State $\mathcal{D}\gets\mathcal{D}\cup\{(\mathbf{X},\mathbf{Y})\}$
+  \EndFor
+\EndFor
+
+\Statex \textbf{// Phase 3: Optimization}
+\State initialize $\phi$
+\For{epoch $=1$ \textbf{to} $E$}
+  \ForAll{mini-batch $(\mathbf{X},\mathbf{Y})\subset\mathcal{D}$}
+    \State $\mathbf{y}_{\text{prev}} \gets \mathbf{Y}_{0}$
+           \Comment{last observed coordinate seeds the decoder}
+    \State $(\hat{\mathbf{Y}},\, g) \gets
+           \textsc{TyphoFormer-Forward}(\mathbf{X}, \mathbf{y}_{\text{prev}}, H)$
+    \State $\mathcal{L}_{\text{reg}} \gets
+           \frac{1}{|\mathbf{X}|}\sum \big(\max(0,\ \tau - g)\big)^2$
+           \Comment{penalize a vanishing gate}
+    \State $\mathcal{L} \gets
+           \underbrace{\tfrac{1}{H}\!\sum_{h}\!\lVert\hat{\mathbf{Y}}_h-\mathbf{Y}_h\rVert_2^2}_{\text{MSE}}
+           + \lambda_g\,\mathcal{L}_{\text{reg}}$
+    \State $\phi \gets \phi - \eta\,\nabla_{\phi}\mathcal{L}$
+           \Comment{Adam update}
+  \EndFor
+\EndFor
+\State \Return $\phi$
+\end{algorithmic}
+\end{algorithm}
+
+% =============================================================================
+% ALGORITHM 2 : Forward pass
+% =============================================================================
+\begin{algorithm}[t]
+\caption{\textsc{TyphoFormer-Forward}: PGF Fusion, ST-Encoder, AR-Decoder}
+\label{alg:typhoformer-forward}
+\begin{algorithmic}[1]
+\Require Windowed input $\mathbf{X}=\{(\xnum_t,\pmean_t)\}_{t=1}^{L}$;
+         seed coordinate $\mathbf{y}_{\text{prev}}\in\mathbb{R}^2$; horizon $H$
+\Ensure  Predicted track $\hat{\mathbf{Y}}\in\mathbb{R}^{H\times 2}$;
+         gate activations $g$
+
+\Procedure{Prompt-aware Gating Fusion}{$\xnum_t,\pmean_t$}
+  \For{$t \gets 1$ \textbf{to} $L$}
+    \State $g_t \gets \sig\!\big(\Wg\,[\xnum_t;\pmean_t] + \bg\big)$
+           \Comment{gate $\in(0,1)^{d}$, Eq.~(1)}
+    \State $\xfuse_t \gets g_t \hadamard (\mathbf{W}_x\xnum_t)
+                       + (1-g_t)\hadamard(\mathbf{W}_p\pmean_t)$
+           \Comment{modality-balanced fusion}
+  \EndFor
+  \State \Return $\mathbf{Z}=\{\xfuse_1,\dots,\xfuse_L\}$,\ \ $g$
+\EndProcedure
+
+\Statex
+\State $\mathbf{Z},\, g \gets \Call{Prompt-aware Gating Fusion}{\mathbf{X}}$
+
+\Statex \textbf{// Spatio-temporal Transformer encoder}
+\State $\mathbf{H}^{(0)} \gets \text{InputProj}(\mathbf{Z})$
+\For{$\ell \gets 1$ \textbf{to} $N_{\text{layers}}$}
+  \State $\mathbf{H}^{(\ell)} \gets \text{TemporalSelfAttn}_\ell(\mathbf{H}^{(\ell-1)})$
+         \Comment{attention over time steps}
+  \State $\mathbf{H}^{(\ell)} \gets \text{SpatialSelfAttn}_\ell(\mathbf{H}^{(\ell)})$
+         \Comment{attention over nodes ($N{=}1$)}
+\EndFor
+\State $\hstate_L \gets \mathbf{H}^{(N_{\text{layers}})}_{L}$
+       \Comment{context vector at the last step}
+
+\Statex \textbf{// Autoregressive decoder}
+\State $\mathbf{y}_t \gets \mathbf{y}_{\text{prev}}$
+\For{$h \gets 1$ \textbf{to} $H$}
+  \State $\mathbf{z}_t \gets [\hstate_L;\ \mathbf{y}_t]$
+  \State $\mathbf{y}_t \gets \mathbf{W}_2\,\text{ReLU}(\mathbf{W}_1\mathbf{z}_t)$
+         \Comment{next coordinate $(\hat\varphi,\hat\lambda)$}
+  \State $\hat{\mathbf{Y}}_h \gets \mathbf{y}_t$
+\EndFor
+\State \Return $\hat{\mathbf{Y}},\, g$
+\end{algorithmic}
+\end{algorithm}

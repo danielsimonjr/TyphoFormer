@@ -19,7 +19,92 @@ year = {2025}
 > TyphoFormer is a hybrid multi-modal Transformer designed for tropical cyclone (other names: Hurricane, Typhoon) track prediction. It integrates `numerical meteorological features` and `LLM-augmented language embeddings` through a Prompt-aware Gating Fusion (PGF) module, followed by a spatio-temporal Transformer backbone and autoregressive decoding for track forecasting.
 
 
-## 🧱 2.Repository Structure
+## 🧠 2.Model Algorithm (Pseudocode)
+
+> The pseudocode below summarizes the full TyphoFormer pipeline. The LaTeX source (paper-style `algorithmicx`) is available in [`TyphoFormer_algorithm.tex`](TyphoFormer_algorithm.tex) for direct reuse in a paper.
+
+### Training
+
+<p align="center">
+  <picture>
+    <source srcset="assets/algorithm1_training.svg" type="image/svg+xml">
+    <img src="assets/algorithm1_training.png" alt="TyphoFormer training algorithm" width="820">
+  </picture>
+</p>
+
+**Algorithm 1** describes the end-to-end training recipe:
+- **Phase 1 — Language context (offline, cached).** For each record, GPT-4o produces a natural-language description (`generate_text_description_new.py`); a sentence encoder (`all-MiniLM-L6-v2`) turns it into token embeddings (`generate_text_embeddings.py`); the tokens are mean-pooled into a single prompt vector $\bar{p}$.
+- **Phase 2 — Sliding windows.** Each trajectory is sliced into `(INPUT_LEN=L, PRED_LEN=H)` samples (`prepare_typhoformer_data.py`).
+- **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term $\lambda_g\,(\max(0,\tau-g))^2$ that discourages the fusion gate from collapsing ($\tau{=}0.6$, $\lambda_g{=}0.1$ in `train_typhoformer.py`).
+
+### Forward Pass
+
+<p align="center">
+  <picture>
+    <source srcset="assets/algorithm2_forward.svg" type="image/svg+xml">
+    <img src="assets/algorithm2_forward.png" alt="TyphoFormer forward pass algorithm" width="820">
+  </picture>
+</p>
+
+**Algorithm 2** details a single forward pass through the three model modules (`model/`):
+- **Prompt-aware Gating Fusion (PGF).** Computes a per-timestep gate $g_t=\sigma(W_g[x_t;\bar{p}_t]+b_g)$ and blends the projected numerical and textual features, $\tilde{x}_t=g_t\odot W_x x_t+(1-g_t)\odot W_p\bar{p}_t$ (Eq. 1 in the paper). This lets the model modulate how much language context to trust at each step (`model/PGF_module.py`).
+- **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over $N_{\text{layers}}$ blocks — the single-track setting uses $N{=}1$ node — producing a context vector $h_L$ at the last step (`model/STTransformer.py`).
+- **Autoregressive decoder.** Rolls out $H$ future coordinates, feeding each prediction back together with $h_L$ (`TyphoDecoder` in `model/TyphoFormer.py`).
+
+### Data-Flow Diagram
+
+The diagram below renders the same two algorithms as a single end-to-end data flow — from raw records to the optimizer — with each stage color-coded by module.
+
+```mermaid
+flowchart TD
+    subgraph PREP["Phase 1 · Language Context (offline, cached)"]
+        R["Typhoon record x_t"] --> G["GPT-4o<br/>semantic prompt"]
+        G --> TE["Sentence encoder<br/>all-MiniLM-L6-v2"]
+        TE --> MP["Mean-pool tokens<br/>p&#772; = (1/M) &#931; p_m"]
+    end
+
+    X["Numerical features x_t"] --> CAT
+    MP --> CAT
+
+    subgraph PGF["Prompt-aware Gating Fusion (PGF)"]
+        CAT["Concat [x_t ; p&#772;]"] --> GATE["Gate<br/>g = &#963;(W_g[x_t;p&#772;] + b_g)"]
+        GATE --> BLEND["x&#771;_t = g &#8857; W_x x_t<br/>+ (1 &#8722; g) &#8857; W_p p&#772;"]
+    end
+
+    subgraph ENC["Spatio-Temporal Transformer Encoder (x N_layers)"]
+        IP["Input projection"] --> TA["Temporal self-attention"]
+        TA --> SA["Spatial self-attention"]
+        SA --> HL["Context vector h_L"]
+    end
+
+    subgraph DEC["Autoregressive Decoder (h = 1..H)"]
+        LOOP["z = [h_L ; y_prev]<br/>y = W_2 ReLU(W_1 z)<br/>feed y back as y_prev"] --> YHAT["Predicted track Y&#770; (lat, lon)"]
+    end
+
+    BLEND -->|"Z = x&#771;_1..x&#771;_L"| IP
+    HL --> LOOP
+    YSEED["Last observed coord y_prev"] --> LOOP
+
+    YHAT --> LOSS["Loss = MSE(Y&#770;, Y)<br/>+ &#955;_g (max(0, &#964; &#8722; g))&#178;"]
+    GATE -.->|"gate g"| LOSS
+    LOSS --> OPT["Adam update &#966;"]
+
+    classDef prep fill:#eef6ff,stroke:#4a90d9,color:#0b3d66;
+    classDef fuse fill:#eafaf1,stroke:#27ae60,color:#145a32;
+    classDef enc fill:#fef9e7,stroke:#d4ac0d,color:#7d6608;
+    classDef dec fill:#fdedec,stroke:#e74c3c,color:#78281f;
+    classDef train fill:#f4ecf7,stroke:#8e44ad,color:#4a235a;
+    class R,G,TE,MP prep;
+    class CAT,GATE,BLEND fuse;
+    class IP,TA,SA,HL enc;
+    class LOOP,YHAT dec;
+    class LOSS,OPT train;
+```
+
+**Reading the diagram.** Numerical features $x_t$ and the mean-pooled prompt vector $\bar{p}$ meet at the **PGF** block (green), where a sigmoid gate $g$ decides — per time step — how much of each modality to keep. The fused sequence $Z$ flows through the **spatio-temporal encoder** (yellow), whose alternating temporal/spatial attention yields the context vector $h_L$. The **autoregressive decoder** (red) unrolls $H$ steps, feeding each predicted coordinate back in, to produce the track $\hat{Y}$. During training, both the prediction and the gate $g$ feed the **objective** (purple) — MSE plus the gate-penalty regularizer — which is optimized with Adam.
+
+
+## 🧱 3.Repository Structure
 ```bash
 TyphoFormer/
 ├── model/
@@ -47,7 +132,7 @@ TyphoFormer/
 └── utils.py
 ```
 
-## ⚙️ 3. Environment Setup
+## ⚙️ 4. Environment Setup
 ```
 torch >= 2.1.0
 transformers
@@ -58,7 +143,7 @@ pandas
 numpy
 ```
 
-## 🧩 4. Data Preparation
+## 🧩 5. Data Preparation
 
 (1) Step 1: Use `generate_text_description_new.py` to create GPT-4o enhanced natural language descriptions for each typhoon record. (We already provided the generated language descriptions with this repository).
 
@@ -86,7 +171,7 @@ X = data["input"]
 Y = data["target"]
 ```
 
-## 🚀 5.Training and Evaluation
+## 🚀 6.Training and Evaluation
 
 > 😄 We alrdeay provided a 5-year processed data, which can directly used for model training, so that you can run model training and evaluation directly. 
 
@@ -123,7 +208,7 @@ D_TEXT = 384 #dim of language embedding (all-MiniLM-L6-v2）
 </p>
 
 
-## 📊 6.Performance Results
+## 📊 7.Performance Results
 <img width="600" alt="image" src="https://github.com/LabRAI/TyphoFormer/blob/main/assets/Table1_Experimental_results.png">
 
 
