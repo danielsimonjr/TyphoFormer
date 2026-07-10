@@ -51,9 +51,13 @@ TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / 
 </p>
 
 **Algorithm 1** describes the end-to-end training recipe:
-- **Phase 1 — Language context (offline, cached).** For each record, GPT-4o produces a natural-language description (`generate_text_description_new.py`); a sentence encoder (`all-MiniLM-L6-v2`) turns it into token embeddings (`generate_text_embeddings.py`); the tokens are mean-pooled into a single prompt vector $\bar{p}$.
+- **Phase 1 — Language context (offline, cached).** For each record, GPT-4o produces a natural-language description (`generate_text_description_new.py`); a sentence encoder (`all-MiniLM-L6-v2`) turns it into token embeddings (`generate_text_embeddings.py`); the tokens are mean-pooled into a single prompt vector `p̄`.
 - **Phase 2 — Sliding windows.** Each trajectory is sliced into `(INPUT_LEN=L, PRED_LEN=H)` samples (`prepare_typhoformer_data.py`).
-- **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term $\lambda_g\,(\max(0,\tau-g))^2$ that discourages the fusion gate from collapsing ($\tau{=}0.6$, $\lambda_g{=}0.1$ in `train_typhoformer.py`).
+- **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term that keeps the fusion gate from collapsing (`τ = 0.6`, `λ_g = 0.1` in `train_typhoformer.py`):
+
+$$
+\mathcal{L} = \mathrm{MSE}(\hat{Y},\, Y) \;+\; \lambda_g \big(\max(0,\; \tau - g)\big)^2
+$$
 
 ### Forward Pass
 
@@ -65,9 +69,14 @@ TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / 
 </p>
 
 **Algorithm 2** details a single forward pass through the three model modules (`model/`):
-- **Prompt-aware Gating Fusion (PGF).** Computes a per-timestep gate $g_t=\sigma(W_g[x_t;\bar{p}_t]+b_g)$ and blends the projected numerical and textual features, $\tilde{x}_t=g_t\odot W_x x_t+(1-g_t)\odot W_p\bar{p}_t$ (Eq. 1 in the paper). This lets the model modulate how much language context to trust at each step (`model/PGF_module.py`).
-- **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over $N_{\text{layers}}$ blocks — the single-track setting uses $N{=}1$ node — producing a context vector $h_L$ at the last step (`model/STTransformer.py`).
-- **Autoregressive decoder.** Rolls out $H$ future coordinates, feeding each prediction back together with $h_L$ (`TyphoDecoder` in `model/TyphoFormer.py`).
+- **Prompt-aware Gating Fusion (PGF).** Computes a per-time-step sigmoid gate and blends the projected numerical and textual features (Eq. 1, shown below), letting the model modulate how much language context to trust at each step (`model/PGF_module.py`).
+- **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over `N_layers` blocks — the single-track setting uses `N = 1` node — producing a context vector `h_L` at the last step (`model/STTransformer.py`).
+- **Autoregressive decoder.** Rolls out `H` future coordinates, feeding each prediction back together with `h_L` (`TyphoDecoder` in `model/TyphoFormer.py`).
+
+$$
+g_t = \sigma\!\big(W_g\,[x_t;\bar{p}_t] + b_g\big), \qquad
+\tilde{x}_t = g_t \odot W_x x_t + (1 - g_t)\,\odot\, W_p\bar{p}_t
+$$
 
 ### Data-Flow Diagram
 
@@ -119,7 +128,7 @@ flowchart TD
     class LOSS,OPT train;
 ```
 
-**Reading the diagram.** Numerical features $x_t$ and the mean-pooled prompt vector $\bar{p}$ meet at the **PGF** block (green), where a sigmoid gate $g$ decides — per time step — how much of each modality to keep. The fused sequence $Z$ flows through the **spatio-temporal encoder** (yellow), whose alternating temporal/spatial attention yields the context vector $h_L$. The **autoregressive decoder** (red) unrolls $H$ steps, feeding each predicted coordinate back in, to produce the track $\hat{Y}$. During training, both the prediction and the gate $g$ feed the **objective** (purple) — MSE plus the gate-penalty regularizer — which is optimized with Adam.
+**Reading the diagram.** Numerical features `x_t` and the mean-pooled prompt vector `p̄` meet at the **PGF** block (green), where a sigmoid gate `g` decides — per time step — how much of each modality to keep. The fused sequence `Z` flows through the **spatio-temporal encoder** (yellow), whose alternating temporal/spatial attention yields the context vector `h_L`. The **autoregressive decoder** (red) unrolls `H` steps, feeding each predicted coordinate back in, to produce the track `Ŷ`. During training, both the prediction and the gate `g` feed the **objective** (purple) — MSE plus the gate-penalty regularizer — which is optimized with Adam.
 
 ## 📊 Results
 
