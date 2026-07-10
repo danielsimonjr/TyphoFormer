@@ -55,9 +55,12 @@ TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / 
 - **Phase 2 — Sliding windows.** Each trajectory is sliced into `(INPUT_LEN=L, PRED_LEN=H)` samples (`prepare_typhoformer_data.py`).
 - **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term that keeps the fusion gate from collapsing (`τ = 0.6`, `λ_g = 0.1` in `train_typhoformer.py`):
 
-$$
-\mathcal{L} = \mathrm{MSE}(\hat{Y},\, Y) \;+\; \lambda_g \big(\max(0,\; \tau - g)\big)^2
-$$
+<p align="center">
+  <picture>
+    <source srcset="assets/eq_loss.svg" type="image/svg+xml">
+    <img src="assets/eq_loss.png" alt="L = MSE(Y-hat, Y) + lambda_g (max(0, tau - g))^2" width="330">
+  </picture>
+</p>
 
 ### Forward Pass
 
@@ -73,10 +76,12 @@ $$
 - **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over `N_layers` blocks — the single-track setting uses `N = 1` node — producing a context vector `h_L` at the last step (`model/STTransformer.py`).
 - **Autoregressive decoder.** Rolls out `H` future coordinates, feeding each prediction back together with `h_L` (`TyphoDecoder` in `model/TyphoFormer.py`).
 
-$$
-g_t = \sigma\!\big(W_g\,[x_t;\bar{p}_t] + b_g\big), \qquad
-\tilde{x}_t = g_t \odot W_x x_t + (1 - g_t)\,\odot\, W_p\bar{p}_t
-$$
+<p align="center">
+  <picture>
+    <source srcset="assets/eq_pgf.svg" type="image/svg+xml">
+    <img src="assets/eq_pgf.png" alt="g_t = sigma(W_g [x_t; p-bar_t] + b_g);   x-tilde_t = g_t (W_x x_t) + (1 - g_t) (W_p p-bar_t)" width="480">
+  </picture>
+</p>
 
 ### Data-Flow Diagram
 
