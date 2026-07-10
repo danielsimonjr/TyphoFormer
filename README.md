@@ -1,5 +1,18 @@
-# 🏆[SIGSPATIAL 25 Best Short Paper Award] TyphoFormer
-Language-Augmented Transformer for Accurate Typhoon (Hurricane) Track Forecasting
+# TyphoFormer
+
+### 🌀 Language-Augmented Transformer for Accurate Typhoon (Hurricane) Track Forecasting
+
+[![arXiv](https://img.shields.io/badge/arXiv-2506.17609-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2506.17609)
+[![Venue](https://img.shields.io/badge/ACM%20SIGSPATIAL-2025-1f6feb?logo=acm&logoColor=white)](https://doi.org/10.1145/3748636.3763223)
+![Award](https://img.shields.io/badge/Best%20Short%20Paper-Award-e3a008)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/)
+![Python](https://img.shields.io/badge/Python-3.8+-3776ab?logo=python&logoColor=white)
+
+---
+
+> **Official implementation of [TyphoFormer: Language-Augmented Transformer for Accurate Typhoon Track Forecasting](https://arxiv.org/abs/2506.17609)** (Li *et al.*, ACM SIGSPATIAL 2025) — winner of the 🏆 **Best Short Paper Award**. TyphoFormer augments a spatio-temporal Transformer with LLM-generated natural-language prompts that encode high-level meteorological semantics, fusing them into the numerical trajectory through a **Prompt-aware Gating Fusion (PGF)** module. On the **HURDAT2** benchmark it consistently outperforms classical (CLIPER) and deep-learning baselines (LSTM, GRU, Informer, Autoformer, TSMixer) across all 6 / 12 / 18 / 24-hour horizons, reaching a spherical-distance error of **31.5 km at 6 h** (≈12% lower than the strongest baseline) while holding its lead under nonlinear path shifts and sparse historical observations.
+
+**What is TyphoFormer?** For each time step, a Large Language Model turns raw numerical attributes — position, maximum sustained wind, central pressure, and wind radii — into a concise natural-language description; a sentence encoder embeds it, and the **PGF** module adaptively balances how much language context versus numerical signal to trust at each step. A spatio-temporal Transformer encoder then models long-range temporal dependencies before an autoregressive decoder rolls out future latitude/longitude coordinates.
 
 ## 🫶 How to Cite:
 > If you find our work useful, please kindly cite our paper, thank you for your appreciation!
