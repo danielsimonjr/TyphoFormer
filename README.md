@@ -26,7 +26,10 @@ year = {2025}
 ### Training
 
 <p align="center">
-  <img src="assets/algorithm1_training.svg" alt="TyphoFormer training algorithm" width="820">
+  <picture>
+    <source srcset="assets/algorithm1_training.svg" type="image/svg+xml">
+    <img src="assets/algorithm1_training.png" alt="TyphoFormer training algorithm" width="820">
+  </picture>
 </p>
 
 **Algorithm 1** describes the end-to-end training recipe:
@@ -37,7 +40,10 @@ year = {2025}
 ### Forward Pass
 
 <p align="center">
-  <img src="assets/algorithm2_forward.svg" alt="TyphoFormer forward pass algorithm" width="820">
+  <picture>
+    <source srcset="assets/algorithm2_forward.svg" type="image/svg+xml">
+    <img src="assets/algorithm2_forward.png" alt="TyphoFormer forward pass algorithm" width="820">
+  </picture>
 </p>
 
 **Algorithm 2** details a single forward pass through the three model modules (`model/`):
