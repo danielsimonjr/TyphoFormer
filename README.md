@@ -51,6 +51,58 @@ year = {2025}
 - **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over $N_{\text{layers}}$ blocks — the single-track setting uses $N{=}1$ node — producing a context vector $h_L$ at the last step (`model/STTransformer.py`).
 - **Autoregressive decoder.** Rolls out $H$ future coordinates, feeding each prediction back together with $h_L$ (`TyphoDecoder` in `model/TyphoFormer.py`).
 
+### Data-Flow Diagram
+
+The diagram below renders the same two algorithms as a single end-to-end data flow — from raw records to the optimizer — with each stage color-coded by module.
+
+```mermaid
+flowchart TD
+    subgraph PREP["Phase 1 · Language Context (offline, cached)"]
+        R["Typhoon record x_t"] --> G["GPT-4o<br/>semantic prompt"]
+        G --> TE["Sentence encoder<br/>all-MiniLM-L6-v2"]
+        TE --> MP["Mean-pool tokens<br/>p&#772; = (1/M) &#931; p_m"]
+    end
+
+    X["Numerical features x_t"] --> CAT
+    MP --> CAT
+
+    subgraph PGF["Prompt-aware Gating Fusion (PGF)"]
+        CAT["Concat [x_t ; p&#772;]"] --> GATE["Gate<br/>g = &#963;(W_g[x_t;p&#772;] + b_g)"]
+        GATE --> BLEND["x&#771;_t = g &#8857; W_x x_t<br/>+ (1 &#8722; g) &#8857; W_p p&#772;"]
+    end
+
+    subgraph ENC["Spatio-Temporal Transformer Encoder (x N_layers)"]
+        IP["Input projection"] --> TA["Temporal self-attention"]
+        TA --> SA["Spatial self-attention"]
+        SA --> HL["Context vector h_L"]
+    end
+
+    subgraph DEC["Autoregressive Decoder (h = 1..H)"]
+        LOOP["z = [h_L ; y_prev]<br/>y = W_2 ReLU(W_1 z)<br/>feed y back as y_prev"] --> YHAT["Predicted track Y&#770; (lat, lon)"]
+    end
+
+    BLEND -->|"Z = x&#771;_1..x&#771;_L"| IP
+    HL --> LOOP
+    YSEED["Last observed coord y_prev"] --> LOOP
+
+    YHAT --> LOSS["Loss = MSE(Y&#770;, Y)<br/>+ &#955;_g (max(0, &#964; &#8722; g))&#178;"]
+    GATE -.->|"gate g"| LOSS
+    LOSS --> OPT["Adam update &#966;"]
+
+    classDef prep fill:#eef6ff,stroke:#4a90d9,color:#0b3d66;
+    classDef fuse fill:#eafaf1,stroke:#27ae60,color:#145a32;
+    classDef enc fill:#fef9e7,stroke:#d4ac0d,color:#7d6608;
+    classDef dec fill:#fdedec,stroke:#e74c3c,color:#78281f;
+    classDef train fill:#f4ecf7,stroke:#8e44ad,color:#4a235a;
+    class R,G,TE,MP prep;
+    class CAT,GATE,BLEND fuse;
+    class IP,TA,SA,HL enc;
+    class LOOP,YHAT dec;
+    class LOSS,OPT train;
+```
+
+**Reading the diagram.** Numerical features $x_t$ and the mean-pooled prompt vector $\bar{p}$ meet at the **PGF** block (green), where a sigmoid gate $g$ decides — per time step — how much of each modality to keep. The fused sequence $Z$ flows through the **spatio-temporal encoder** (yellow), whose alternating temporal/spatial attention yields the context vector $h_L$. The **autoregressive decoder** (red) unrolls $H$ steps, feeding each predicted coordinate back in, to produce the track $\hat{Y}$. During training, both the prediction and the gate $g$ feed the **objective** (purple) — MSE plus the gate-penalty regularizer — which is optimized with Adam.
+
 
 ## 🧱 3.Repository Structure
 ```bash
