@@ -19,7 +19,34 @@ year = {2025}
 > TyphoFormer is a hybrid multi-modal Transformer designed for tropical cyclone (other names: Hurricane, Typhoon) track prediction. It integrates `numerical meteorological features` and `LLM-augmented language embeddings` through a Prompt-aware Gating Fusion (PGF) module, followed by a spatio-temporal Transformer backbone and autoregressive decoding for track forecasting.
 
 
-## 🧱 2.Repository Structure
+## 🧠 2.Model Algorithm (Pseudocode)
+
+> The pseudocode below summarizes the full TyphoFormer pipeline. The LaTeX source (paper-style `algorithmicx`) is available in [`TyphoFormer_algorithm.tex`](TyphoFormer_algorithm.tex) for direct reuse in a paper.
+
+### Training
+
+<p align="center">
+  <img src="assets/algorithm1_training.svg" alt="TyphoFormer training algorithm" width="820">
+</p>
+
+**Algorithm 1** describes the end-to-end training recipe:
+- **Phase 1 — Language context (offline, cached).** For each record, GPT-4o produces a natural-language description (`generate_text_description_new.py`); a sentence encoder (`all-MiniLM-L6-v2`) turns it into token embeddings (`generate_text_embeddings.py`); the tokens are mean-pooled into a single prompt vector $\bar{p}$.
+- **Phase 2 — Sliding windows.** Each trajectory is sliced into `(INPUT_LEN=L, PRED_LEN=H)` samples (`prepare_typhoformer_data.py`).
+- **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term $\lambda_g\,(\max(0,\tau-g))^2$ that discourages the fusion gate from collapsing ($\tau{=}0.6$, $\lambda_g{=}0.1$ in `train_typhoformer.py`).
+
+### Forward Pass
+
+<p align="center">
+  <img src="assets/algorithm2_forward.svg" alt="TyphoFormer forward pass algorithm" width="820">
+</p>
+
+**Algorithm 2** details a single forward pass through the three model modules (`model/`):
+- **Prompt-aware Gating Fusion (PGF).** Computes a per-timestep gate $g_t=\sigma(W_g[x_t;\bar{p}_t]+b_g)$ and blends the projected numerical and textual features, $\tilde{x}_t=g_t\odot W_x x_t+(1-g_t)\odot W_p\bar{p}_t$ (Eq. 1 in the paper). This lets the model modulate how much language context to trust at each step (`model/PGF_module.py`).
+- **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over $N_{\text{layers}}$ blocks — the single-track setting uses $N{=}1$ node — producing a context vector $h_L$ at the last step (`model/STTransformer.py`).
+- **Autoregressive decoder.** Rolls out $H$ future coordinates, feeding each prediction back together with $h_L$ (`TyphoDecoder` in `model/TyphoFormer.py`).
+
+
+## 🧱 3.Repository Structure
 ```bash
 TyphoFormer/
 ├── model/
@@ -47,7 +74,7 @@ TyphoFormer/
 └── utils.py
 ```
 
-## ⚙️ 3. Environment Setup
+## ⚙️ 4. Environment Setup
 ```
 torch >= 2.1.0
 transformers
@@ -58,7 +85,7 @@ pandas
 numpy
 ```
 
-## 🧩 4. Data Preparation
+## 🧩 5. Data Preparation
 
 (1) Step 1: Use `generate_text_description_new.py` to create GPT-4o enhanced natural language descriptions for each typhoon record. (We already provided the generated language descriptions with this repository).
 
@@ -86,7 +113,7 @@ X = data["input"]
 Y = data["target"]
 ```
 
-## 🚀 5.Training and Evaluation
+## 🚀 6.Training and Evaluation
 
 > 😄 We alrdeay provided a 5-year processed data, which can directly used for model training, so that you can run model training and evaluation directly. 
 
@@ -123,7 +150,7 @@ D_TEXT = 384 #dim of language embedding (all-MiniLM-L6-v2）
 </p>
 
 
-## 📊 6.Performance Results
+## 📊 7.Performance Results
 <img width="600" alt="image" src="https://github.com/LabRAI/TyphoFormer/blob/main/assets/Table1_Experimental_results.png">
 
 
