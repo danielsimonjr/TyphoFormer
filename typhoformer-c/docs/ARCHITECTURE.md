@@ -247,26 +247,33 @@ backward: dA += dy·xᵀ           # dA[0,t] += Σ_d dy[0,d]·x[t,d]
 ### 4.3 Autoregressive decoder — `decoder_forward` / `decoder_backward`
 
 Two linears `fc1:(D+2)→D`, `fc2:D→2`. Seeded with `yprev`, it rolls out
-`pred_len` steps; training uses one step:
+`pred_len` steps, feeding each predicted coordinate back in as the next step's
+input coordinate (autoregression). Per step `s` (with `ŷ_{-1} = y_prev`):
 
 ```
-z  = [h ; y_prev]        # concat context and previous coord → [1, D+2]
-h1 = fc1(z)
-a  = relu(h1)
-ŷ  = fc2(a)              # predicted (lat, lon)
+z_s  = [h ; ŷ_{s-1}]     # concat context and previous coord → [1, D+2]
+h1_s = fc1(z_s)
+a_s  = relu(h1_s)
+ŷ_s  = fc2(a_s)          # predicted (lat, lon) at step s
 ```
 
-Backward (single step):
+Forward caches `z_s`, `h1_s`, `a_s` for every step. Backward runs from the last
+step to the first, and — this is the autoregressive part — the gradient w.r.t.
+step `s`'s *input coordinate* is added into step `s−1`'s *output* gradient:
 
 ```
-da   = fc2.backward(dŷ)
-dh1  = da ⊙ 1[h1>0]
-dz   = fc1.backward(dh1)
-dh   = dz[0:D]           # gradient w.r.t. the encoder context (y_prev is data)
+for s = pred_len-1 … 0:
+    dŷ_s += dŷ_next             # dŷ_next carries the feedback from step s+1
+    da    = fc2.backward(dŷ_s)
+    dh1   = da ⊙ 1[h1_s>0]
+    dz    = fc1.backward(dh1)
+    dh   += dz[0:D]             # accumulate context grad across all steps
+    dŷ_next = dz[D:D+2]         # feedback: coord grad → previous step's output
 ```
 
-For multi-step rollout you would additionally propagate `dz[D:D+2]` back to the
-previous step's output — see [EXTENDING.md](EXTENDING.md).
+With `pred_len = 1` the feedback term vanishes and this reduces to the
+single-step case. The whole thing is finite-difference checked at `pred_len = 3`
+in `tests/test_model.c` (`check_model(3)`).
 
 ### 4.4 Loss — `model_loss`
 

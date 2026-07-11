@@ -101,7 +101,7 @@ metric `|g_num − g_ana| / (|g_num| + |g_ana| + 1e-2)` and an absolute floor of
 
 | Change | What to touch |
 |:--|:--|
-| **Multi-step decoding** (`pred_len > 1`) | `decoder_forward` already loops; `decoder_backward` currently assumes one step. Cache per-step `z`/`h1`, run backward from the last step to the first, and add `dz[D:D+2]` back into the previous step's output gradient (the autoregressive feedback). |
+| **Multi-step decoding** (`pred_len > 1`) | Already implemented: `decoder_forward` caches per-step `z`/`h1`/`a`, and `decoder_backward` runs from the last step to the first, feeding `dz[D:D+2]` back into the previous step's output gradient (the autoregressive feedback). `tests/test_model` gradient-checks it at `pred_len=3`. Read it as the reference for any recurrent backprop. |
 | **Pre-norm blocks** | reorder `block_forward` to `y = x + MHA(LN1(x))` etc.; mirror the residual/LN order in `block_backward`. |
 | **Dropout** | add a cached 0/1 mask in forward (scaled by `1/(1-p)`), multiply by it in backward; disable at eval with a flag. Seed via `nn_uniform`. |
 | **Learned positional encoding** | add a `[T,D]` parameter to the encoder, `+=` it after `input_proj`, register it, and add its (identity) gradient in backward. |
@@ -124,20 +124,58 @@ metric `|g_num − g_ana| / (|g_num| + |g_ana| + 1e-2)` and an absolute floor of
 
 ---
 
-## 6. Good student projects
+## 6. Extension seams (build behind an interface, not by forking the core)
 
-Ordered roughly easy → hard:
+Three parts of the codebase are deliberately factored as **seams** so you can add
+capability without editing the core model. Each has a reference implementation
+and a test that is its acceptance criterion.
 
-1. Swap ReLU→GELU (above) and compare validation ΔR.
+### 6a. Pluggable layers — the `Module` interface
+[`include/module.h`](../include/module.h) defines a tiny vtable
+(`self` + `forward`/`backward`/`free`) and a `Sequential` container. Wrap any
+layer as a `Module` and chain it — no core edits, and it is gradient-checkable
+exactly like a built-in. `module_block()` adapts a transformer `Block`; model
+your own on it. **Acceptance:** extend `tests/test_module.c` and watch the
+`Sequential` gradient-check pass.
+
+### 6b. New compute device — the backend seam
+[`include/backend.h`](../include/backend.h) documents the ~13-kernel contract
+(GEMMs, bias, pointwise, scalar) that *every* layer is built from. `src/tensor.c`
+is the CPU backend; implement the same functions over device memory and link
+that file instead to retarget the whole model. A compile-ready CUDA reference is
+in [`backends/cuda/tensor_cuda.cu`](../backends/cuda/tensor_cuda.cu) (see
+[`backends/README.md`](../backends/README.md), including the honest note on the
+glue-code elementwise loops). **Acceptance:** the CPU gradient checks
+(`test_tensor`, `test_model`) pass unchanged against your backend.
+
+### 6c. Multicore training — the data-parallel seam
+[`include/parallel.h`](../include/parallel.h) / `src/parallel.c` replicate the
+model across threads, broadcast weights, and reduce gradients for one optimizer
+step (`--threads=N`). **Acceptance:** `tests/test_parallel` shows the reduced
+gradient equals the serial gradient to ≈1e-7, and ThreadSanitizer is clean.
+
+---
+
+## 7. Good student projects
+
+Ordered roughly easy → hard. (Items marked ✓ are already implemented — study the
+reference, then extend or vary it.)
+
+1. Swap ReLU→GELU (§2) and compare validation ΔR.
 2. Add dropout and measure its effect on overfitting.
 3. Implement pre-norm blocks and compare training stability.
-4. Persist the feature normalization stats in the checkpoint (see
-   [INTEGRATION.md](INTEGRATION.md) §3) so inference is self-contained.
-5. Implement true multi-step (`pred_len > 1`) autoregressive backprop.
-6. Add a tiled/blocked matmul and benchmark cache behavior vs. the current
-   `ikj`/`pij` kernels.
-7. Parallelize the batch loop with threads (one `Model` per thread), and compare
-   throughput scaling — mind the shared RNG (§API concurrency).
+4. ✓ *Done:* normalization stats in the checkpoint ([INTEGRATION.md](INTEGRATION.md)
+   §3). Extend it to per-storm normalization and gradient-check nothing breaks.
+5. ✓ *Done:* multi-step autoregressive backprop (`decoder_backward`). Add
+   teacher forcing as a training-time option and compare.
+6. Add a **tiled/blocked matmul** in a new backend file (§6b) and benchmark cache
+   behavior vs. the current `ikj`/`pij` kernels with `bench`.
+7. ✓ *Done:* multicore data-parallel training (§6c). Extend it to gradient
+   **accumulation** across microbatches, or a persistent thread pool, and confirm
+   `test_parallel` still holds.
+8. Write a new **backend** (SIMD-intrinsics or GPU) behind §6b's contract.
+9. Add a new **Module** (a GRU decoder, a graph-attention spatial block) behind
+   §6a and plug it into a `Sequential`.
 
-Each of these is a self-contained, gradient-checkable change. Start from the
-module pattern in §1 and let the tests be your guide.
+Each is a self-contained, gradient-checkable change. Start from the module
+pattern in §1 (or the matching seam in §6) and let the tests be your guide.

@@ -226,25 +226,26 @@ python legacy/eval_typhoformer.py
 
 ## ⚡ Pure-C Implementation
 
-For a lightweight, portable build with **no machine-learning stack to install**, TyphoFormer is also reimplemented from scratch in **pure C (standard library only)** under [`typhoformer-c/`](typhoformer-c/) — a clean-room port written from the algorithm spec above. It covers the entire pipeline: Prompt-aware Gating Fusion, the spatio-temporal Transformer encoder, and the autoregressive decoder, with hand-written **forward *and* backward** passes, an Adam optimizer, the CSV / `.npy` data loader, and `train` / `eval` / `prepare` subcommands. It links only against `libm` — no PyTorch, no BLAS, no third-party code.
+For a lightweight, portable build with **no machine-learning stack to install**, TyphoFormer is also reimplemented from scratch in **pure C (standard library only)** under [`typhoformer-c/`](typhoformer-c/) — a clean-room port written from the algorithm spec above. It covers the entire pipeline: Prompt-aware Gating Fusion, the spatio-temporal Transformer encoder, and the autoregressive decoder, with hand-written **forward *and* backward** passes, an Adam optimizer, the CSV / `.npy` data loader, and `train` / `eval` / `prepare` / `predict` / `baseline` / `bench` subcommands. It links only against `libm` (and `pthread` for optional multicore) — no PyTorch, no BLAS, no third-party code.
 
 - **🧩 Self-contained.** Builds with any C11 compiler (`gcc`/`clang`) and `make` — nothing to `pip install`.
-- **⚙️ Optimized math.** Hand-written, **cache-blocked** matrix multiplies (`ikj` / `pij` loop orders) compiled at `-O3` — ≈ 6 s/epoch for the compact demo config and ≈ 190 s/epoch for the full 5.1 M-parameter paper config, single-threaded on CPU.
-- **✅ Correctness-checked.** Every layer is validated by finite-difference gradient checks (tensor core, a full transformer block, and the whole model) — all at the single-precision noise floor.
-- **📈 Trains end to end.** On the bundled data it converges and beats a persistence baseline (validation ΔR **79 km** vs **126 km** after 30 epochs).
-- **🛠️ Full CLI + tooling.** `train`, `eval` (from a checkpoint), and `prepare` subcommands, plus `tools/` for the offline GPT-4o / MiniLM preprocessing (the only stages that stay Python, since they need external models).
+- **⚙️ Optimized math.** Hand-written, **cache-blocked** matrix multiplies (`ikj` / `pij` loop orders) compiled at `-O3` — ≈ 6 s/epoch for the compact demo config and ≈ 190 s/epoch for the full 5.1 M-parameter paper config; `make NATIVE=1` (SIMD) and `--threads=N` (data-parallel multicore) scale it further.
+- **✅ Correctness-checked.** Every layer is validated by finite-difference gradient checks (tensor core, a full transformer block, the whole model at `pred_len=3`), plus a golden-loss regression, checkpoint round-trip, `.npy`/split, module-interface, and multicore-equivalence tests — under a **gcc + clang** CI matrix with sanitizers and valgrind.
+- **📈 Trains end to end.** On the bundled data it converges and beats a persistence baseline (validation ΔR **79 km** vs **126 km** after 30 epochs), with per-horizon (6h/12h/…) metrics and in-repo persistence / CLIPER baselines.
+- **🧱 Built to be extended.** A pluggable [`Module`](typhoformer-c/include/module.h) interface for new layers, a documented [compute-backend seam](typhoformer-c/include/backend.h) (CPU + a CUDA reference under [`backends/`](typhoformer-c/backends/)), and [data-parallel multicore](typhoformer-c/include/parallel.h) training — each with its own gradient/equivalence test. Curated **labs, a glossary, and a theory↔code map** turn it into a course.
+- **🛠️ Full CLI + tooling.** Six subcommands with configurable hyperparameters, plus `tools/` for the offline GPT-4o / MiniLM preprocessing (the only stages that stay Python, since they need external models).
 - **📜 MIT-licensed.** The port is original clean-room code, so it carries its own permissive license ([`typhoformer-c/LICENSE`](typhoformer-c/LICENSE)).
 
 ```bash
 cd typhoformer-c
-make test                              # gradient checks + data-loader smoke test
+make test                              # gradient checks, golden, module, parallel, checkpoint, npy
 make && ./typhoformer 30               # train (compact config) on the bundled data
-./typhoformer 5 --full                 # full paper configuration (d_model=256, 3 layers)
-./typhoformer eval --weights=typhoformer.ckpt   # evaluate a saved checkpoint (MAE + ΔR)
-./typhoformer prepare --out=data.tfb            # build a windowed dataset from CSV + embeddings
+./typhoformer 30 --full --threads=8    # full paper config, data-parallel across 8 cores
+./typhoformer eval --weights=typhoformer.ckpt   # evaluate a saved checkpoint (MAE + ΔR, per horizon)
+./typhoformer predict --weights=typhoformer.ckpt --out=pred.csv   # predicted vs. true tracks
 ```
 
-See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, all subcommands and flags, the `tools/` preprocessing scripts, and the `.npy` → `.tfb` data converter. In-depth documentation for students and engineers — the full backprop math, API reference, integration guide, and extension guide — is in [`typhoformer-c/docs/`](typhoformer-c/docs/).
+See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, all subcommands and flags, multicore training, the compute-backend seam, the `tools/` preprocessing scripts, and the `.npy` → `.tfb` data converter. In-depth documentation for students and engineers — the full backprop math, a theory↔code map, glossary, hands-on labs, API reference, integration guide, and extension guide — is in [`typhoformer-c/docs/`](typhoformer-c/docs/).
 
 ## 📁 Repository Structure
 
@@ -253,22 +254,28 @@ TyphoFormer/
 │
 ├── typhoformer-c/                      # ⚡ Dependency-free pure-C reimplementation (MIT)
 │   ├── include/                        #   public headers
-│   │   ├── tensor.h                    #     matrix primitives
+│   │   ├── tensor.h  backend.h         #     matrix primitives + compute-backend seam
 │   │   ├── nn.h                        #     Linear, LayerNorm, FFN, attention, block
 │   │   ├── model.h                     #     PGF, ST-encoder, AR decoder, full model
-│   │   ├── data.h                      #     CSV + .npy loader
+│   │   ├── module.h                    #     pluggable Module vtable + Sequential
+│   │   ├── parallel.h                  #     data-parallel multicore training
+│   │   ├── data.h  checkpoint.h        #     CSV + .npy loader; checkpoint I/O
 │   │   └── optim.h                     #     Adam
-│   ├── src/                            #   implementations
+│   ├── src/                            #   implementations (one per header)
 │   │   ├── tensor.c  nn.c  model.c     #     core + layers + model
-│   │   ├── data.c    optim.c           #     data pipeline + optimizer
-│   │   └── train.c                     #     train / eval / prepare driver (main)
-│   ├── tests/                          #   gradient checks + data-loader test
-│   │   └── test_{tensor,nn,model,data}.c
+│   │   ├── module.c  parallel.c        #     extension seam + multicore
+│   │   ├── data.c  optim.c  checkpoint.c
+│   │   └── train.c                     #     train/eval/prepare/predict/baseline/bench (main)
+│   ├── backends/                       #   compute backends behind the kernel seam
+│   │   ├── README.md                   #     how to retarget the model to a device
+│   │   └── cuda/tensor_cuda.cu         #     compile-ready GPU reference (needs nvcc)
+│   ├── tests/                          #   gradient checks + regression + I/O tests
+│   │   └── test_{tensor,nn,model,data,golden,module,parallel,checkpoint,npy}.c
 │   ├── tools/                          #   offline preprocessing (Python)
 │   │   ├── gen_descriptions.py         #     GPT-4o descriptions
 │   │   ├── gen_embeddings.py           #     MiniLM embeddings
 │   │   └── npy_dict_to_bin.py          #     .npy-dict → .tfb converter
-│   ├── docs/                           #   architecture/math, API, integration, extending
+│   ├── docs/                           #   architecture/math, theory-map, glossary, labs, API, …
 │   ├── Makefile  LICENSE  README.md    #   `make test` / `make && ./typhoformer`
 │
 ├── legacy/                             # 🗄️ Original PyTorch implementation (see legacy/README.md)
