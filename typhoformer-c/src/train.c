@@ -30,24 +30,45 @@ static double haversine(float lat1, float lon1, float lat2, float lon2) {
     return 2.0 * R_EARTH * asin(sqrt(a < 0 ? 0 : a));
 }
 
-typedef struct { double mae, km, base_km; } Eval;
+#define MAXH 32
+typedef struct {
+    int    H;
+    double mae[MAXH], km[MAXH], base_km[MAXH];  /* per forecast horizon */
+    double mmae, mkm, mbase;                    /* horizon means */
+} Eval;
 
 static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
+    int H = d->pred_len < MAXH ? d->pred_len : MAXH;
     Mat xn = mat_new(d->in_len, d->d_num), xt = mat_new(d->in_len, d->d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(d->pred_len, 2);
-    Eval e = {0, 0, 0};
+    Eval e; memset(&e, 0, sizeof e); e.H = H;
     for (int i = 0; i < n; ++i) {
         int s = idx ? idx[i] : i;
         dataset_get(d, s, xn, xt, yp, Y);
         model_forward(m, xn, xt, yp);
-        float plat = m->pred.data[0], plon = m->pred.data[1];
-        e.mae += (fabs(plat - Y.data[0]) + fabs(plon - Y.data[1])) / 2.0;
-        e.km  += haversine(plat, plon, Y.data[0], Y.data[1]);
-        e.base_km += haversine(yp.data[0], yp.data[1], Y.data[0], Y.data[1]);
+        for (int h = 0; h < H; ++h) {
+            float plat = m->pred.data[h * 2], plon = m->pred.data[h * 2 + 1];
+            float tlat = Y.data[h * 2],       tlon = Y.data[h * 2 + 1];
+            e.mae[h]     += (fabs(plat - tlat) + fabs(plon - tlon)) / 2.0;
+            e.km[h]      += haversine(plat, plon, tlat, tlon);
+            e.base_km[h] += haversine(yp.data[0], yp.data[1], tlat, tlon);  /* persistence */
+        }
     }
-    e.mae /= n; e.km /= n; e.base_km /= n;
+    for (int h = 0; h < H; ++h) {
+        e.mae[h] /= n; e.km[h] /= n; e.base_km[h] /= n;
+        e.mmae += e.mae[h]; e.mkm += e.km[h]; e.mbase += e.base_km[h];
+    }
+    e.mmae /= H; e.mkm /= H; e.mbase /= H;
     mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y);
     return e;
+}
+
+static void print_horizons(const Eval *e) {
+    if (e->H <= 1) return;
+    printf("  per-horizon:\n");
+    for (int h = 0; h < e->H; ++h)
+        printf("    %2dh | MAE %.4f | dR %.2f km | persistence %.2f km\n",
+               (h + 1) * 6, e->mae[h], e->km[h], e->base_km[h]);
 }
 
 static Dataset load_source(const char *bin, const char *csv, const char *emb, int in_len, int pred_len) {
@@ -63,20 +84,42 @@ static Dataset load_source(const char *bin, const char *csv, const char *emb, in
 
 /* ---- train ---------------------------------------------------------- */
 static int cmd_train(int argc, char **argv) {
-    int epochs = 10, full = 0;
+    int epochs = 10, full = 0, batch = 8;
+    int pred_len = -1, d_model = -1, d_ff = -1, n_layers = -1, n_heads = -1, in_len = -1;
+    float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f;
+    int patience = 0;                 /* 0 = disabled (early stopping) */
+    unsigned long seed = 20260711;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT;
-    const float lambda = 0.1f; const int batch = 8;
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--full"))     full = 1;
         else if (!strncmp(argv[i], "--csv=", 6)) csv = argv[i] + 6;
         else if (!strncmp(argv[i], "--emb=", 6)) emb = argv[i] + 6;
         else if (!strncmp(argv[i], "--bin=", 6)) bin = argv[i] + 6;
         else if (!strncmp(argv[i], "--save=", 7)) save = argv[i] + 7;
+        else if (!strncmp(argv[i], "--pred_len=", 11)) pred_len = atoi(argv[i] + 11);
+        else if (!strncmp(argv[i], "--d_model=", 10))  d_model = atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--d_ff=", 7))      d_ff = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--n_layers=", 11)) n_layers = atoi(argv[i] + 11);
+        else if (!strncmp(argv[i], "--n_heads=", 10))  n_heads = atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--in_len=", 9))    in_len = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--batch=", 8))     batch = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--lr=", 5))        lr = (float)atof(argv[i] + 5);
+        else if (!strncmp(argv[i], "--wd=", 5))        wd = (float)atof(argv[i] + 5);
+        else if (!strncmp(argv[i], "--lambda=", 9))    lambda = (float)atof(argv[i] + 9);
+        else if (!strncmp(argv[i], "--lr_decay=", 11)) lr_decay = (float)atof(argv[i] + 11);
+        else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
+        else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') epochs = atoi(argv[i]);
     }
-    nn_seed(20260711);
+    nn_seed(seed);
     Config c = config_default();
     if (!full) { c.d_model = 64; c.d_ff = 128; c.n_layers = 2; }
+    if (d_model  > 0) c.d_model  = d_model;
+    if (d_ff     > 0) c.d_ff     = d_ff;
+    if (n_layers > 0) c.n_layers = n_layers;
+    if (n_heads  > 0) c.n_heads  = n_heads;
+    if (in_len   > 0) c.in_len   = in_len;
+    if (pred_len > 0) c.pred_len = pred_len;
 
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin) { c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text; }
@@ -86,9 +129,9 @@ static int cmd_train(int argc, char **argv) {
 
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
-    Adam opt = adam_new(&pl, 1e-3f, 1e-5f);
-    printf("model params = %ld | d_model=%d layers=%d heads=%d d_ff=%d\n\n",
-           plist_num_params(&pl), c.d_model, c.n_layers, c.n_heads, c.d_ff);
+    Adam opt = adam_new(&pl, lr, wd);
+    printf("model params = %ld | d_model=%d layers=%d heads=%d d_ff=%d pred_len=%d\n\n",
+           plist_num_params(&pl), c.d_model, c.n_layers, c.n_heads, c.d_ff, c.pred_len);
 
     Mat xn = mat_new(c.in_len, c.d_num), xt = mat_new(c.in_len, c.d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(c.pred_len, 2);
@@ -96,7 +139,8 @@ static int cmd_train(int argc, char **argv) {
 
     Eval e0 = evaluate(&m, &ds, val, nva);
     printf("epoch  0 (init)          | val MAE %.4f | val dR %.2f km  (persistence %.2f km)\n",
-           e0.mae, e0.km, e0.base_km);
+           e0.mmae, e0.mkm, e0.mbase);
+    double best = 1e300; int best_ep = 0, since_improve = 0; Eval best_e = e0;
     for (int ep = 1; ep <= epochs; ++ep) {
         for (int i = ntr - 1; i > 0; --i) { int j = (int)(nn_uniform(0, 1) * (i + 1)); if (j > i) j = i;
             int t = train[i]; train[i] = train[j]; train[j] = t; }
@@ -117,10 +161,19 @@ static int cmd_train(int argc, char **argv) {
             run_loss += bl / bs; ++nb;
         }
         Eval e = evaluate(&m, &ds, val, nva);
-        printf("epoch %2d | train loss %.5f | val MAE %.4f | val dR %.2f km\n", ep, run_loss / nb, e.mae, e.km);
+        printf("epoch %2d | train loss %.5f | val MAE %.4f | val dR %.2f km\n", ep, run_loss / nb, e.mmae, e.mkm);
+        if (e.mkm < best) {                          /* keep the best model on disk */
+            best = e.mkm; best_ep = ep; best_e = e; since_improve = 0;
+            checkpoint_save2(save, c, ds.mean, ds.std, ds.d_num, &pl);
+        } else if (++since_improve >= patience && patience > 0) {
+            printf("early stop: no val improvement for %d epochs\n", patience); break;
+        }
+        opt.lr *= lr_decay;                          /* LR schedule (1.0 = off) */
     }
-    checkpoint_save(save, c, &pl);
-    printf("saved checkpoint -> %s (%ld params)\n", save, plist_num_params(&pl));
+    if (best_ep == 0) checkpoint_save2(save, c, ds.mean, ds.std, ds.d_num, &pl);
+    printf("best val dR %.2f km at epoch %d  ->  saved %s (%ld params)\n",
+           best_ep ? best : e0.mkm, best_ep, save, plist_num_params(&pl));
+    print_horizons(&best_e);
 
     mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
     free(train); free(val); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
@@ -147,7 +200,8 @@ static int cmd_eval(int argc, char **argv) {
     checkpoint_load_params(weights, &pl);
     Eval e = evaluate(&m, &ds, NULL, ds.n_samples);
     printf("eval on %d samples | MAE %.4f | dR %.2f km  (persistence %.2f km)\n",
-           ds.n_samples, e.mae, e.km, e.base_km);
+           ds.n_samples, e.mmae, e.mkm, e.mbase);
+    print_horizons(&e);
 
     model_free(&m); plist_free(&pl); dataset_free(&ds);
     return 0;

@@ -63,10 +63,10 @@ void    encoder_free(Encoder *e);
 /* ---- Autoregressive decoder ----------------------------------------- */
 typedef struct {
     Linear fc1, fc2;
-    int    hidden, out;
-    Mat    z, h1;                       /* caches (single-step) */
+    int    hidden, out, max_steps;
+    Mat   *zc, *h1c, *ac;               /* per-step caches (autoregressive rollout) */
     Mat    s_yt, s_a, s_ytn;            /* forward scratch */
-    Mat    s_da, s_dh1, s_dz;           /* backward scratch */
+    Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dhacc;  /* backward scratch */
 } Decoder;
 Decoder decoder_new(const Config *c, ParamList *pl);
 void    decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat preds);

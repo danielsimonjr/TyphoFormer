@@ -1,7 +1,7 @@
 /*
  * test_model.c — finite-difference gradient check of the whole model
- * (PGF + spatio-temporal encoder + autoregressive decoder + loss) on a
- * small configuration. This validates the full forward/backward composition.
+ * (PGF + spatio-temporal encoder + autoregressive decoder + loss) on a small
+ * configuration, for both single-step and multi-step (autoregressive) decoding.
  */
 #include "model.h"
 
@@ -20,10 +20,10 @@ static double loss_only(void) {
     return model_loss(M.pred, Y, M.pgf.gate, LAMBDA, none, none);
 }
 
-int main(void) {
-    nn_seed(7);
+static int check_model(int pred_len) {
+    printf("[model gradient check, pred_len=%d]\n", pred_len);
     Config c; c.d_num = 3; c.d_text = 5; c.d_model = 8; c.out_dim = 2;
-    c.in_len = 4; c.pred_len = 1; c.d_ff = 16; c.n_heads = 2; c.n_layers = 1;
+    c.in_len = 4; c.pred_len = pred_len; c.d_ff = 16; c.n_heads = 2; c.n_layers = 1;
 
     plist_init(&pl);
     M = model_new(&c, &pl);
@@ -37,14 +37,12 @@ int main(void) {
     for (int i = 0; i < c.out_dim; ++i)           yprev.data[i] = nn_uniform(-1, 1);
     for (int i = 0; i < c.pred_len * c.out_dim; ++i) Y.data[i]  = nn_uniform(-1, 1);
 
-    /* analytic gradients */
     Mat dpred = mat_new(c.pred_len, c.out_dim), dgate = mat_new(c.in_len, c.d_model);
     model_forward(&M, xnum, xtext, yprev);
     model_loss(M.pred, Y, M.pgf.gate, LAMBDA, dpred, dgate);
     plist_zero_grad(&pl);
     model_backward(&M, dpred, dgate);
 
-    /* finite differences over every parameter */
     const float eps = 1e-3f, floor = 1e-2f;
     float max_err = 0.0f, max_abs = 0.0f; long checked = 0;
     for (int p = 0; p < pl.count; ++p)
@@ -61,13 +59,22 @@ int main(void) {
             ++checked;
         }
 
-    printf("model params: %ld (checked %ld)\n", plist_num_params(&pl), checked);
-    printf("max rel err = %.2e, max abs err = %.2e\n", max_err, max_abs);
+    printf("  params: %ld (checked %ld) | max rel err = %.2e, max abs err = %.2e\n",
+           plist_num_params(&pl), checked, max_err, max_abs);
     int fail = (max_err >= 2e-2f && max_abs >= 1e-3f);
-    printf(fail ? "FAIL: model gradients\n" : "\nmodel gradient check passed\n");
+    if (fail) printf("  FAIL: model gradients\n"); else printf("  ok\n");
 
     model_free(&M); plist_free(&pl);
     mat_free(&xnum); mat_free(&xtext); mat_free(&yprev); mat_free(&Y);
     mat_free(&dpred); mat_free(&dgate);
+    return fail;
+}
+
+int main(void) {
+    nn_seed(7);
+    int fail = 0;
+    fail |= check_model(1);   /* single-step */
+    fail |= check_model(3);   /* multi-step autoregressive rollout */
+    if (!fail) printf("\nmodel gradient check passed\n");
     return fail;
 }
