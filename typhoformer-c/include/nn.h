@@ -33,6 +33,10 @@ void plist_add(ParamList *pl, float *v, float *g, int n, const char *name);
 void plist_zero_grad(ParamList *pl);
 long plist_num_params(const ParamList *pl);
 void plist_free(ParamList *pl);
+/* Global-norm gradient clipping. Returns the pre-clip L2 norm of all gradients;
+ * if it exceeds max_norm (and max_norm > 0), scales every gradient by
+ * max_norm/norm in place. */
+float plist_clip_grad_norm(ParamList *pl, float max_norm);
 
 /* ---- Linear:  y[T,out] = x[T,in] W^T + b ---------------------------- */
 typedef struct {

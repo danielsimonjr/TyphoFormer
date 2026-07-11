@@ -63,6 +63,18 @@ long plist_num_params(const ParamList *pl) {
     long t = 0; for (int i = 0; i < pl->count; ++i) t += pl->item[i].n; return t;
 }
 void plist_free(ParamList *pl) { free(pl->item); plist_init(pl); }
+float plist_clip_grad_norm(ParamList *pl, float max_norm) {
+    double sq = 0.0;
+    for (int i = 0; i < pl->count; ++i)
+        for (int e = 0; e < pl->item[i].n; ++e) { double g = pl->item[i].g[e]; sq += g * g; }
+    float norm = (float)sqrt(sq);
+    if (max_norm > 0.0f && norm > max_norm) {
+        float s = max_norm / (norm + 1e-6f);
+        for (int i = 0; i < pl->count; ++i)
+            for (int e = 0; e < pl->item[i].n; ++e) pl->item[i].g[e] *= s;
+    }
+    return norm;
+}
 
 /* ---- shape helper ---------------------------------------------------- */
 static void ensure(Mat *m, int r, int c) {

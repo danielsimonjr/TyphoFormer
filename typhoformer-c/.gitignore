@@ -17,5 +17,6 @@ backends/opencl/test_opencl
 *.bin
 *.out
 *.ckpt
+*.opt
 *.tfb
 *.a

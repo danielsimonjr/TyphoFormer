@@ -92,10 +92,11 @@ static Dataset load_source(const char *bin, const char *csv, const char *emb, in
 static int cmd_train(int argc, char **argv) {
     int epochs = 10, full = 0, batch = 8, threads = 1;
     int pred_len = -1, d_model = -1, d_ff = -1, n_layers = -1, n_heads = -1, in_len = -1;
-    float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f, dropout = 0.1f;
+    float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f, dropout = 0.1f, clip = 1.0f;
     int patience = 0;                 /* 0 = disabled (early stopping) */
+    int warmup = 0;                   /* linear LR warmup steps (0 = off)  */
     unsigned long seed = 20260711;
-    const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT;
+    const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--full"))     full = 1;
         else if (!strncmp(argv[i], "--csv=", 6)) csv = argv[i] + 6;
@@ -115,6 +116,9 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--lambda=", 9))    lambda = (float)atof(argv[i] + 9);
         else if (!strncmp(argv[i], "--lr_decay=", 11)) lr_decay = (float)atof(argv[i] + 11);
         else if (!strncmp(argv[i], "--dropout=", 10))  dropout = (float)atof(argv[i] + 10);
+        else if (!strncmp(argv[i], "--clip=", 7))      clip = (float)atof(argv[i] + 7);
+        else if (!strncmp(argv[i], "--warmup=", 9))    warmup = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--resume=", 9))    resume = argv[i] + 9;
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') epochs = atoi(argv[i]);
@@ -148,6 +152,15 @@ static int cmd_train(int argc, char **argv) {
     Model m = model_new(&c, &pl);
     Adam opt = adam_new(&pl, lr, wd);
     ParTrainer *pt = (threads > 1) ? partrainer_new(&c, threads) : NULL;
+    int start_ep = 0;
+    if (resume) {                                    /* resume weights + optimizer state */
+        char opath[1024]; snprintf(opath, sizeof opath, "%s.opt", resume);
+        checkpoint_load_params(resume, &pl);
+        if (checkpoint_load_optim(opath, &opt, &start_ep))
+            printf("resumed from %s (+ %s) at epoch %d\n", resume, opath, start_ep);
+        else
+            printf("resumed weights from %s (no optimizer state; Adam restarts)\n", resume);
+    }
     printf("model params = %ld | d_model=%d layers=%d heads=%d d_ff=%d pred_len=%d | threads=%d\n\n",
            plist_num_params(&pl), c.d_model, c.n_layers, c.n_heads, c.d_ff, c.pred_len, threads);
 
@@ -159,7 +172,8 @@ static int cmd_train(int argc, char **argv) {
     printf("epoch  0 (init)          | val MAE %.4f | val dR %.2f km  (persistence %.2f km)\n",
            e0.mmae, e0.mkm, e0.mbase);
     double best = 1e300; int best_ep = 0, since_improve = 0; Eval best_e = e0;
-    for (int ep = 1; ep <= epochs; ++ep) {
+    long gstep = 0; float decay_mult = 1.0f;         /* LR schedule state */
+    for (int ep = start_ep + 1; ep <= epochs; ++ep) {
         for (int i = ntr - 1; i > 0; --i) { int j = (int)(nn_uniform(0, 1) * (i + 1)); if (j > i) j = i;
             int t = train[i]; train[i] = train[j]; train[j] = t; }
         double run_loss = 0.0; int nb = 0;
@@ -169,7 +183,7 @@ static int cmd_train(int argc, char **argv) {
             if (pt) {                                /* data-parallel across cores */
                 partrainer_broadcast(pt, &pl);       /* replicas <- master weights */
                 run_loss += partrainer_step_grads(pt, &pl, &ds, train, b, bs, lambda);
-            } else {                                 /* serial (byte-identical golden path) */
+            } else {                                 /* serial */
                 plist_zero_grad(&pl);
                 double bl = 0.0;
                 for (int k = 0; k < bs; ++k) {
@@ -182,6 +196,10 @@ static int cmd_train(int argc, char **argv) {
                 }
                 run_loss += bl / bs;
             }
+            plist_clip_grad_norm(&pl, clip);         /* global-norm gradient clipping */
+            ++gstep;
+            float warm = (warmup > 0 && gstep < warmup) ? (float)gstep / (float)warmup : 1.0f;
+            opt.lr = lr * decay_mult * warm;         /* warmup x per-epoch decay */
             adam_step(&opt, &pl);
             ++nb;
         }
@@ -190,10 +208,12 @@ static int cmd_train(int argc, char **argv) {
         if (e.mkm < best) {                          /* keep the best model on disk */
             best = e.mkm; best_ep = ep; best_e = e; since_improve = 0;
             checkpoint_save3(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, &pl);
+            char opath[1024]; snprintf(opath, sizeof opath, "%s.opt", save);
+            checkpoint_save_optim(opath, &opt, ep);  /* sidecar for --resume */
         } else if (++since_improve >= patience && patience > 0) {
             printf("early stop: no val improvement for %d epochs\n", patience); break;
         }
-        opt.lr *= lr_decay;                          /* LR schedule (1.0 = off) */
+        decay_mult *= lr_decay;                       /* per-epoch LR decay (1.0 = off) */
     }
     if (best_ep == 0) checkpoint_save3(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, &pl);
     printf("best val dR %.2f km at epoch %d  ->  saved %s (%ld params)\n",
