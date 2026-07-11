@@ -226,22 +226,25 @@ python legacy/eval_typhoformer.py
 
 ## ⚡ Pure-C Implementation
 
-For a lightweight, portable build with **no machine-learning stack to install**, TyphoFormer is also reimplemented from scratch in **pure C (standard library only)** under [`typhoformer-c/`](typhoformer-c/) — a clean-room port written from the algorithm spec above. It covers the entire pipeline: Prompt-aware Gating Fusion, the spatio-temporal Transformer encoder, and the autoregressive decoder, with hand-written **forward *and* backward** passes, an Adam optimizer, the CSV / `.npy` data loader, and training + evaluation. It links only against `libm` — no PyTorch, no BLAS, no third-party code.
+For a lightweight, portable build with **no machine-learning stack to install**, TyphoFormer is also reimplemented from scratch in **pure C (standard library only)** under [`typhoformer-c/`](typhoformer-c/) — a clean-room port written from the algorithm spec above. It covers the entire pipeline: Prompt-aware Gating Fusion, the spatio-temporal Transformer encoder, and the autoregressive decoder, with hand-written **forward *and* backward** passes, an Adam optimizer, the CSV / `.npy` data loader, and `train` / `eval` / `prepare` subcommands. It links only against `libm` — no PyTorch, no BLAS, no third-party code.
 
 - **🧩 Self-contained.** Builds with any C11 compiler (`gcc`/`clang`) and `make` — nothing to `pip install`.
 - **⚙️ Optimized math.** Hand-written, **cache-blocked** matrix multiplies (`ikj` / `pij` loop orders) compiled at `-O3` — ≈ 6 s/epoch for the compact demo config and ≈ 190 s/epoch for the full 5.1 M-parameter paper config, single-threaded on CPU.
 - **✅ Correctness-checked.** Every layer is validated by finite-difference gradient checks (tensor core, a full transformer block, and the whole model) — all at the single-precision noise floor.
 - **📈 Trains end to end.** On the bundled data it converges and beats a persistence baseline (validation ΔR **79 km** vs **126 km** after 30 epochs).
+- **🛠️ Full CLI + tooling.** `train`, `eval` (from a checkpoint), and `prepare` subcommands, plus `tools/` for the offline GPT-4o / MiniLM preprocessing (the only stages that stay Python, since they need external models).
 - **📜 MIT-licensed.** The port is original clean-room code, so it carries its own permissive license ([`typhoformer-c/LICENSE`](typhoformer-c/LICENSE)).
 
 ```bash
 cd typhoformer-c
-make test                 # gradient checks + data-loader smoke test
-make && ./typhoformer 30  # train (compact config) on the bundled data
-./typhoformer 5 --full    # full paper configuration (d_model=256, 3 layers)
+make test                              # gradient checks + data-loader smoke test
+make && ./typhoformer 30               # train (compact config) on the bundled data
+./typhoformer 5 --full                 # full paper configuration (d_model=256, 3 layers)
+./typhoformer eval --weights=typhoformer.ckpt   # evaluate a saved checkpoint (MAE + ΔR)
+./typhoformer prepare --out=data.tfb            # build a windowed dataset from CSV + embeddings
 ```
 
-See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, the `.npy` → `.tfb` data converter, and all CLI flags.
+See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, all subcommands and flags, the `tools/` preprocessing scripts, and the `.npy` → `.tfb` data converter.
 
 ## 📁 Repository Structure
 
@@ -258,10 +261,13 @@ TyphoFormer/
 │   ├── src/                            #   implementations
 │   │   ├── tensor.c  nn.c  model.c     #     core + layers + model
 │   │   ├── data.c    optim.c           #     data pipeline + optimizer
-│   │   └── train.c                     #     training/eval entry point (main)
+│   │   └── train.c                     #     train / eval / prepare driver (main)
 │   ├── tests/                          #   gradient checks + data-loader test
 │   │   └── test_{tensor,nn,model,data}.c
-│   ├── tools/npy_dict_to_bin.py        #   .npy-dict → .tfb data converter
+│   ├── tools/                          #   offline preprocessing (Python)
+│   │   ├── gen_descriptions.py         #     GPT-4o descriptions
+│   │   ├── gen_embeddings.py           #     MiniLM embeddings
+│   │   └── npy_dict_to_bin.py          #     .npy-dict → .tfb converter
 │   ├── Makefile  LICENSE  README.md    #   `make test` / `make && ./typhoformer`
 │
 ├── legacy/                             # 🗄️ Original PyTorch implementation (see legacy/README.md)
