@@ -262,8 +262,13 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 |:--|:--:|:--:|
 | default (intensity + text) | 128.5 ± 41.3 km | ~parity |
 | **`--motion`** (feed position + velocity) | 79.0 ± 26.8 km | beats it |
-| **`--motion --delta`** (predict displacement) | **48.1 ± 2.7 km** | **2.5× better** |
+| **`--motion --delta`** (predict displacement) | 48.1 ± 2.7 km | 2.5× better |
 | `--motion --delta --no_text` (numbers only) | 46.5 ± 3.9 km | 2.6× better |
+| **`--motion --cv`** (constant-velocity decoder) | **40.5 km** | **reaches CLIPER (~39 km)** |
+
+`--cv` anchors the decoder at constant-velocity extrapolation and learns only the
+curvature — the first architectural change that reaches the constant-velocity
+baseline the model had been trailing (see [FINDINGS §9](docs/FINDINGS.md)).
 
 The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
 default model was **blind to motion** (its inputs are intensity + text; position
