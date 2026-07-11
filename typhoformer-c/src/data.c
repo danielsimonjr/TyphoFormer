@@ -106,6 +106,7 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     }
     fclose(f);
     d.n_records = n;
+    d.n_storms = gid + 1;
 
     /* ---- embeddings ---- */
     struct dirent **names; int nc = scandir(embdir, &names, emb_name_filter, alphasort);
@@ -123,14 +124,10 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     free(names);
     if (got != n) { die("embeddings (%d) != records (%d)", got, n); }
 
-    /* ---- standardize numerical features (z-score per column) ---- */
-    for (int j = 0; j < d.d_num; ++j) {
-        double m = 0.0; for (int i = 0; i < n; ++i) m += d.num[i * d.d_num + j]; m /= n;
-        double v = 0.0; for (int i = 0; i < n; ++i) { double t = d.num[i * d.d_num + j] - m; v += t * t; }
-        v = sqrt(v / n); if (v < 1e-6) v = 1.0;
-        d.mean[j] = (float)m; d.std[j] = (float)v;
-        for (int i = 0; i < n; ++i) d.num[i * d.d_num + j] = (float)((d.num[i * d.d_num + j] - m) / v);
-    }
+    /* Features/coords are left RAW here; dataset_split3 + dataset_standardize
+     * fit and apply normalization on the TRAIN storms only (no leakage).
+     * Until then, coordinate stats are identity so dataset_get returns degrees. */
+    d.cmean[0] = d.cmean[1] = 0.0f; d.cstd[0] = d.cstd[1] = 1.0f;
 
     /* ---- sliding windows within a storm ---- */
     int need = in_len + pred_len;
@@ -141,23 +138,86 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     return d;
 }
 
+/* Fit a z-score over the records flagged in `use` (or all records if use==NULL);
+ * writes mean/std and normalizes d->num in place. */
+static void fit_apply_features(Dataset *d, const char *use) {
+    for (int j = 0; j < d->d_num; ++j) {
+        double m = 0.0; long c = 0;
+        for (int i = 0; i < d->n_records; ++i)
+            if (!use || use[i]) { m += d->num[i * d->d_num + j]; ++c; }
+        if (c == 0) c = 1;
+        m /= c;
+        double v = 0.0;
+        for (int i = 0; i < d->n_records; ++i)
+            if (!use || use[i]) { double t = d->num[i * d->d_num + j] - m; v += t * t; }
+        v = sqrt(v / c); if (v < 1e-6) v = 1.0;
+        d->mean[j] = (float)m; d->std[j] = (float)v;
+        for (int i = 0; i < d->n_records; ++i)
+            d->num[i * d->d_num + j] = (float)((d->num[i * d->d_num + j] - m) / v);
+    }
+}
+
+void dataset_standardize(Dataset *d) {
+    if (d->prewindowed) return;                    /* bin path standardizes itself */
+    char *use = (char *)malloc((size_t)d->n_records);
+    int have_split = (d->storm_split != NULL);
+    for (int i = 0; i < d->n_records; ++i)
+        use[i] = have_split ? (d->storm_split[d->gid[i]] == 0) : 1;   /* train storms */
+    fit_apply_features(d, use);
+    /* coordinate stats on the same train records */
+    double lm = 0, om = 0; long c = 0;
+    for (int i = 0; i < d->n_records; ++i) if (use[i]) { lm += d->lat[i]; om += d->lon[i]; ++c; }
+    if (c == 0) c = 1;
+    lm /= c; om /= c;
+    double lv = 0, ov = 0;
+    for (int i = 0; i < d->n_records; ++i) if (use[i]) {
+        double a = d->lat[i] - lm, b = d->lon[i] - om; lv += a * a; ov += b * b; }
+    lv = sqrt(lv / c);
+    ov = sqrt(ov / c);
+    if (lv < 1e-6) lv = 1.0;
+    if (ov < 1e-6) ov = 1.0;
+    d->cmean[0] = (float)lm; d->cmean[1] = (float)om;
+    d->cstd[0]  = (float)lv; d->cstd[1]  = (float)ov;
+    free(use);
+}
+
+void dataset_apply_stats(Dataset *d, const float *mean, const float *std, int n,
+                         const float *cmean, const float *cstd) {
+    for (int j = 0; j < d->d_num && j < n; ++j) {
+        float m = mean[j], s = (std[j] > 1e-12f) ? std[j] : 1.0f;
+        d->mean[j] = m; d->std[j] = s;
+        for (int i = 0; i < d->n_records; ++i)
+            d->num[i * d->d_num + j] = (d->num[i * d->d_num + j] - m) / s;
+    }
+    if (cmean && cstd) {
+        d->cmean[0] = cmean[0]; d->cmean[1] = cmean[1];
+        d->cstd[0]  = (cstd[0] > 1e-12f) ? cstd[0] : 1.0f;
+        d->cstd[1]  = (cstd[1] > 1e-12f) ? cstd[1] : 1.0f;
+    }
+}
+
 Dataset dataset_load_bin(const char *path) {
     Dataset d; memset(&d, 0, sizeof(d));
     FILE *f = fopen(path, "rb");
     if (!f) { die("cannot open %s", path); }
     char magic[4]; int hdr[5];
-    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "TFB1", 4)) { die("%s: bad magic", path); }
+    if (fread(magic, 1, 4, f) != 4 ||
+        (memcmp(magic, "TFB1", 4) && memcmp(magic, "TFB2", 4))) { die("%s: bad magic", path); }
+    int has_seed = (memcmp(magic, "TFB2", 4) == 0);   /* TFB2 stores a true seed coord */
     if (fread(hdr, sizeof(int), 5, f) != 5) die("%s: unexpected end of file", path);
     d.n_samples = hdr[0]; d.in_len = hdr[1];
     int feat = hdr[2]; d.pred_len = hdr[3]; int out = hdr[4];
     d.d_num = 14; d.d_text = feat - d.d_num; d.prewindowed = 1;
     assert(out == 2 && d.d_text > 0);
+    d.cmean[0] = d.cmean[1] = 0.0f; d.cstd[0] = d.cstd[1] = 1.0f;   /* coords raw */
     size_t in_sz = (size_t)d.in_len * feat, tg_sz = (size_t)d.pred_len * out;
     d.win_in = malloc((size_t)d.n_samples * in_sz * sizeof(float));
     d.win_tg = malloc((size_t)d.n_samples * tg_sz * sizeof(float));
+    if (has_seed) d.win_seed = malloc((size_t)d.n_samples * 2 * sizeof(float));
     for (int s = 0; s < d.n_samples; ++s) {
         if (fread(&d.win_in[s * in_sz], sizeof(float), in_sz, f) != in_sz) die("%s: unexpected end of file", path);
         if (fread(&d.win_tg[s * tg_sz], sizeof(float), tg_sz, f) != tg_sz) die("%s: unexpected end of file", path);
+        if (has_seed && fread(&d.win_seed[s * 2], sizeof(float), 2, f) != 2) die("%s: unexpected end of file", path);
     }
     fclose(f);
     /* standardize the numerical feature columns (0..d_num-1) across all steps */
@@ -180,6 +240,17 @@ Dataset dataset_load_bin(const char *path) {
     return d;
 }
 
+/* Normalize a (lat,lon) pair with the dataset's coordinate stats. */
+static void cnorm(const Dataset *d, float *lat, float *lon) {
+    *lat = (*lat - d->cmean[0]) / d->cstd[0];
+    *lon = (*lon - d->cmean[1]) / d->cstd[1];
+}
+
+void dataset_denorm(const Dataset *d, float *latlon) {
+    latlon[0] = latlon[0] * d->cstd[0] + d->cmean[0];
+    latlon[1] = latlon[1] * d->cstd[1] + d->cmean[1];
+}
+
 void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y) {
     if (d->prewindowed) {
         const int F = d->d_num + d->d_text;
@@ -189,8 +260,14 @@ void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y)
             memcpy(&xtext.data[t * d->d_text], &in[(size_t)t * F + d->d_num], d->d_text * sizeof(float));
         }
         const float *tg = &d->win_tg[(size_t)s * d->pred_len * 2];
-        yprev.data[0] = tg[0]; yprev.data[1] = tg[1];   /* seed = first target (upstream) */
-        for (int k = 0; k < d->pred_len; ++k) { Y.data[k * 2] = tg[k * 2]; Y.data[k * 2 + 1] = tg[k * 2 + 1]; }
+        /* TFB2 stores the true last-observed seed; TFB1 falls back to tg[0]. */
+        if (d->win_seed) { yprev.data[0] = d->win_seed[s * 2]; yprev.data[1] = d->win_seed[s * 2 + 1]; }
+        else             { yprev.data[0] = tg[0];              yprev.data[1] = tg[1]; }
+        cnorm(d, &yprev.data[0], &yprev.data[1]);
+        for (int k = 0; k < d->pred_len; ++k) {
+            Y.data[k * 2] = tg[k * 2]; Y.data[k * 2 + 1] = tg[k * 2 + 1];
+            cnorm(d, &Y.data[k * 2], &Y.data[k * 2 + 1]);
+        }
         return;
     }
     int r0 = d->start[s];
@@ -200,10 +277,82 @@ void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y)
     }
     int last = r0 + d->in_len - 1;                    /* last observed coord = decoder seed */
     yprev.data[0] = d->lat[last]; yprev.data[1] = d->lon[last];
+    cnorm(d, &yprev.data[0], &yprev.data[1]);
     for (int k = 0; k < d->pred_len; ++k) {
         Y.data[k * 2 + 0] = d->lat[r0 + d->in_len + k];
         Y.data[k * 2 + 1] = d->lon[r0 + d->in_len + k];
+        cnorm(d, &Y.data[k * 2], &Y.data[k * 2 + 1]);
     }
+}
+
+Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed) {
+    Split sp; memset(&sp, 0, sizeof sp);
+    if (d->prewindowed || d->n_storms <= 0 || d->start == NULL) {
+        /* No storm/overlap info (.tfb): fall back to a sample-level split.
+         * Windows may overlap, so this is not fully leakage-safe — prefer CSV. */
+        int N = d->n_samples;
+        int *idx = (int *)malloc((size_t)(N ? N : 1) * sizeof(int));
+        for (int i = 0; i < N; ++i) idx[i] = i;
+        unsigned long rng = seed ? seed : 1;
+        for (int i = N - 1; i > 0; --i) {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+            int j = (int)(rng % (unsigned long)(i + 1));
+            int t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+        }
+        int nv = (int)(val_frac * N), nte = (int)(test_frac * N);
+        if (nv + nte > N) nte = N - nv;
+        sp.n_val = nv; sp.n_test = nte; sp.n_train = N - nv - nte;
+        sp.val   = (int *)malloc((size_t)(sp.n_val   ? sp.n_val   : 1) * sizeof(int));
+        sp.test  = (int *)malloc((size_t)(sp.n_test  ? sp.n_test  : 1) * sizeof(int));
+        sp.train = (int *)malloc((size_t)(sp.n_train ? sp.n_train : 1) * sizeof(int));
+        for (int i = 0; i < nv; ++i)             sp.val[i]            = idx[i];
+        for (int i = 0; i < nte; ++i)            sp.test[i]           = idx[nv + i];
+        for (int i = nv + nte; i < N; ++i)       sp.train[i - nv - nte] = idx[i];
+        free(idx);
+        return sp;
+    }
+    int S = d->n_storms;
+    /* shuffle storm ids deterministically, then slice by fraction */
+    int *order = (int *)malloc((size_t)(S ? S : 1) * sizeof(int));
+    for (int i = 0; i < S; ++i) order[i] = i;
+    unsigned long rng = seed ? seed : 1;
+    for (int i = S - 1; i > 0; --i) {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+        int j = (int)(rng % (unsigned long)(i + 1));
+        int t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+    int nv = (int)(val_frac * S), nte = (int)(test_frac * S);
+    if (nv + nte > S) { nte = S - nv; if (nte < 0) nte = 0; }
+    free(d->storm_split);
+    d->storm_split = (int *)malloc((size_t)(S ? S : 1) * sizeof(int));
+    for (int i = 0; i < S; ++i) {
+        int label = (i < nv) ? 1 : (i < nv + nte) ? 2 : 0;   /* val / test / train */
+        d->storm_split[order[i]] = label;
+    }
+    free(order);
+    /* bucket samples by their storm's label */
+    for (int s = 0; s < d->n_samples; ++s) {
+        int lab = d->storm_split[d->gid[d->start[s]]];
+        if      (lab == 0) sp.n_train++;
+        else if (lab == 1) sp.n_val++;
+        else               sp.n_test++;
+    }
+    sp.train = (int *)malloc((size_t)(sp.n_train ? sp.n_train : 1) * sizeof(int));
+    sp.val   = (int *)malloc((size_t)(sp.n_val   ? sp.n_val   : 1) * sizeof(int));
+    sp.test  = (int *)malloc((size_t)(sp.n_test  ? sp.n_test  : 1) * sizeof(int));
+    int it = 0, iv = 0, ie = 0;
+    for (int s = 0; s < d->n_samples; ++s) {
+        int lab = d->storm_split[d->gid[d->start[s]]];
+        if      (lab == 0) sp.train[it++] = s;
+        else if (lab == 1) sp.val[iv++]   = s;
+        else               sp.test[ie++]  = s;
+    }
+    return sp;
+}
+
+void split_free(Split *s) {
+    free(s->train); free(s->val); free(s->test);
+    memset(s, 0, sizeof *s);
 }
 
 void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
@@ -228,6 +377,6 @@ void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
 
 void dataset_free(Dataset *d) {
     free(d->num); free(d->emb); free(d->lat); free(d->lon); free(d->gid); free(d->start);
-    free(d->win_in); free(d->win_tg);
+    free(d->win_in); free(d->win_tg); free(d->win_seed); free(d->storm_split);
     memset(d, 0, sizeof(*d));
 }

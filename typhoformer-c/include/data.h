@@ -2,6 +2,15 @@
  * data.h — dataset loading: parse the HURDAT2 CSV numerical features and the
  * precomputed MiniLM embedding chunks (.npy), group by storm, and build
  * sliding-window samples.
+ *
+ * Leakage-safe methodology (CSV path):
+ *   1. dataset_load()      — parse RAW features/coords, group by storm, build
+ *                            windows. No standardization yet.
+ *   2. dataset_split3()    — assign whole STORMS to train/val/test (so no storm,
+ *                            and no overlapping window, straddles two splits).
+ *   3. dataset_standardize() — fit feature + coordinate stats on the TRAIN
+ *                            storms only, then apply. Nothing from val/test
+ *                            leaks into the normalization statistics.
  */
 #ifndef TYPHOFORMER_DATA_H
 #define TYPHOFORMER_DATA_H
@@ -11,33 +20,67 @@
 typedef struct {
     int    n_records;
     int    d_num, d_text, in_len, pred_len;
-    float *num;          /* n_records * d_num  (standardized in place) */
-    float *emb;          /* n_records * d_text */
-    float *lat, *lon;    /* n_records */
-    int   *gid;          /* storm group id per record */
-    float  mean[64], std[64];
-    int   *start;        /* n_samples window start record indices */
+    float *num;          /* n_records * d_num  (standardized in place)      */
+    float *emb;          /* n_records * d_text                              */
+    float *lat, *lon;    /* n_records (raw degrees)                         */
+    int   *gid;          /* storm group id per record                       */
+    int    n_storms;     /* number of distinct storms (max gid + 1)         */
+    int   *storm_split;  /* n_storms: 0=train 1=val 2=test (NULL until split)*/
+    float  mean[64], std[64];   /* feature normalization (train-only fit)   */
+    float  cmean[2], cstd[2];   /* coord (lat,lon) normalization; identity  */
+                                /* {0,1} means "raw" (bin path / unset)     */
+    int   *start;        /* n_samples window start record indices           */
     int    n_samples;
-    int    prewindowed;  /* 1 => samples come from a .tfb file (below) */
-    float *win_in;       /* n_samples * in_len * (d_num+d_text) */
-    float *win_tg;       /* n_samples * pred_len * 2 */
+    int    prewindowed;  /* 1 => samples come from a .tfb file (below)       */
+    float *win_in;       /* n_samples * in_len * (d_num+d_text)             */
+    float *win_tg;       /* n_samples * pred_len * 2                        */
+    float *win_seed;     /* n_samples * 2: true decoder seed (TFB2) or NULL */
 } Dataset;
 
-/* Load records from `csv` and embeddings from `embdir` (emb_chunk_*.npy),
- * build sliding windows, and standardize the numerical features. */
+/* Load records from `csv` and embeddings from `embdir` (emb_chunk_*.npy) and
+ * build sliding windows. Features are left RAW; call dataset_split3 then
+ * dataset_standardize to normalize without leakage. */
 Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_len);
 
-/* Load pre-windowed samples from a .tfb file produced by
- * tools/npy_dict_to_bin.py. These files carry no coordinates, so the decoder
- * is seeded with the first target coordinate (as in the upstream code). */
+/* Load pre-windowed samples from a .tfb file (tools/npy_dict_to_bin.py or the
+ * `prepare` subcommand). TFB2 files carry the true decoder seed coordinate;
+ * legacy TFB1 files do not, so those fall back to seeding with the first target
+ * (a mild label leak — prefer the CSV path or regenerate as TFB2). */
 Dataset dataset_load_bin(const char *path);
+
+/* A train/val/test partition of sample indices (into d->start). */
+typedef struct {
+    int *train, *val, *test;
+    int  n_train, n_val, n_test;
+} Split;
+
+/* Deterministic STORM-level split: whole storms go to train/val/test, so
+ * overlapping windows never straddle splits. Records d->storm_split. */
+Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed);
+void  split_free(Split *s);
+
+/* Fit feature + coordinate normalization on the TRAIN storms only (per
+ * d->storm_split) and apply the feature z-score to d->num in place. Coordinate
+ * stats are stored and applied on the fly in dataset_get. */
+void dataset_standardize(Dataset *d);
+
+/* Apply externally-provided stats (e.g. loaded from a checkpoint) to a freshly
+ * loaded raw dataset: sets mean/std + cmean/cstd and z-scores d->num in place.
+ * Pass cmean=cstd=NULL to leave coordinates raw ({0,1}). */
+void dataset_apply_stats(Dataset *d, const float *mean, const float *std, int n,
+                         const float *cmean, const float *cstd);
 
 /* Materialise sample `s` into caller-provided matrices:
  *   xnum [in_len,d_num], xtext [in_len,d_text], yprev [1,2], Y [pred_len,2].
- * yprev is the last *observed* coordinate (decoder seed). */
+ * Coordinates (yprev, Y) are returned NORMALIZED by cmean/cstd. Use
+ * dataset_denorm() to convert model outputs / targets back to degrees. */
 void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y);
 
-/* Deterministic shuffle + split of sample indices into train/val. */
+/* Convert a normalized (lat,lon) pair back to raw degrees (in place, len-2). */
+void dataset_denorm(const Dataset *d, float *latlon);
+
+/* Legacy 2-way sample-level split (deterministic shuffle). Kept as a utility;
+ * NOT leakage-safe for overlapping windows — use dataset_split3 for training. */
 void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
                    int **train, int *n_train, int **val, int *n_val);
 

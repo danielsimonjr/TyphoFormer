@@ -48,12 +48,15 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
         int s = idx ? idx[i] : i;
         dataset_get(d, s, xn, xt, yp, Y);
         model_forward(m, xn, xt, yp);
+        float seed[2] = { yp.data[0], yp.data[1] };
+        dataset_denorm(d, seed);                        /* coords back to degrees for metrics */
         for (int h = 0; h < H; ++h) {
-            float plat = m->pred.data[h * 2], plon = m->pred.data[h * 2 + 1];
-            float tlat = Y.data[h * 2],       tlon = Y.data[h * 2 + 1];
-            e.mae[h]     += (fabs(plat - tlat) + fabs(plon - tlon)) / 2.0;
-            e.km[h]      += haversine(plat, plon, tlat, tlon);
-            e.base_km[h] += haversine(yp.data[0], yp.data[1], tlat, tlon);  /* persistence */
+            float p[2] = { m->pred.data[h * 2], m->pred.data[h * 2 + 1] };
+            float t[2] = { Y.data[h * 2],       Y.data[h * 2 + 1] };
+            dataset_denorm(d, p); dataset_denorm(d, t);
+            e.mae[h]     += (fabs(p[0] - t[0]) + fabs(p[1] - t[1])) / 2.0;
+            e.km[h]      += haversine(p[0], p[1], t[0], t[1]);
+            e.base_km[h] += haversine(seed[0], seed[1], t[0], t[1]);   /* persistence */
         }
     }
     for (int h = 0; h < H; ++h) {
@@ -126,9 +129,15 @@ static int cmd_train(int argc, char **argv) {
 
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin) { c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text; }
-    int *train, *val, ntr, nva;
-    dataset_split(&ds, 0.15f, 42, &train, &ntr, &val, &nva);
-    printf("records=%d samples=%d  train=%d val=%d\n", ds.n_records, ds.n_samples, ntr, nva);
+    /* Leakage-safe: split whole STORMS into train/val/test, then fit feature +
+     * coordinate normalization on the TRAIN storms only. (The .tfb path has no
+     * storm info, so it splits by sample and standardizes itself.) */
+    Split sp = dataset_split3(&ds, 0.15f, 0.15f, 42);
+    dataset_standardize(&ds);
+    int *train = sp.train, *val = sp.val, *test = sp.test;
+    int ntr = sp.n_train, nva = sp.n_val, nte = sp.n_test;
+    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d\n",
+           ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte);
 
     if (threads < 1) threads = 1;
     ParamList pl; plist_init(&pl);
@@ -175,21 +184,42 @@ static int cmd_train(int argc, char **argv) {
         printf("epoch %2d | train loss %.5f | val MAE %.4f | val dR %.2f km\n", ep, run_loss / nb, e.mmae, e.mkm);
         if (e.mkm < best) {                          /* keep the best model on disk */
             best = e.mkm; best_ep = ep; best_e = e; since_improve = 0;
-            checkpoint_save2(save, c, ds.mean, ds.std, ds.d_num, &pl);
+            checkpoint_save3(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, &pl);
         } else if (++since_improve >= patience && patience > 0) {
             printf("early stop: no val improvement for %d epochs\n", patience); break;
         }
         opt.lr *= lr_decay;                          /* LR schedule (1.0 = off) */
     }
-    if (best_ep == 0) checkpoint_save2(save, c, ds.mean, ds.std, ds.d_num, &pl);
+    if (best_ep == 0) checkpoint_save3(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, &pl);
     printf("best val dR %.2f km at epoch %d  ->  saved %s (%ld params)\n",
            best_ep ? best : e0.mkm, best_ep, save, plist_num_params(&pl));
     print_horizons(&best_e);
 
+    /* Honest generalization estimate: reload the best checkpoint and score the
+     * held-out TEST storms (never seen in training or model selection). */
+    if (nte > 0) {
+        checkpoint_load_params(save, &pl);
+        Eval te = evaluate(&m, &ds, test, nte);
+        printf("HELD-OUT TEST: dR %.2f km | MAE %.4f  (persistence %.2f km) over %d samples\n",
+               te.mkm, te.mmae, te.mbase, nte);
+        print_horizons(&te);
+    }
+
     mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
     if (pt) partrainer_free(pt);
-    free(train); free(val); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
+    split_free(&sp); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
     return 0;
+}
+
+/* Apply a checkpoint's (train-only) normalization to a freshly loaded raw
+ * dataset. No-op for the .tfb path, which standardizes itself. */
+static void apply_ckpt_stats(Dataset *ds, const char *weights) {
+    if (ds->prewindowed) return;
+    float mean[64], std[64], cmean[2], cstd[2];
+    int ns = checkpoint_load_stats(weights, mean, std);
+    int hc = checkpoint_load_coord_stats(weights, cmean, cstd);
+    dataset_apply_stats(ds, ns ? mean : NULL, ns ? std : NULL, ns,
+                        hc ? cmean : NULL, hc ? cstd : NULL);
 }
 
 /* ---- eval ----------------------------------------------------------- */
@@ -207,6 +237,7 @@ static int cmd_eval(int argc, char **argv) {
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin && ds.d_text != c.d_text) { die("d_text mismatch (data %d vs model %d)", ds.d_text, c.d_text); }
 
+    apply_ckpt_stats(&ds, weights);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     checkpoint_load_params(weights, &pl);
@@ -236,21 +267,25 @@ static int cmd_prepare(int argc, char **argv) {
     FILE *f = fopen(out, "wb");
     if (!f) { fprintf(stderr, "cannot write %s\n", out); return 1; }
     int hdr[5] = {ds.n_samples, ds.in_len, feat, ds.pred_len, out_dim};
-    fwrite("TFB1", 1, 4, f); fwrite(hdr, sizeof(int), 5, f);
+    /* TFB2: store the true last-observed seed coordinate per sample so the
+     * decoder is not seeded with a target label. Features are written raw;
+     * dataset_load_bin standardizes them on load. */
+    fwrite("TFB2", 1, 4, f); fwrite(hdr, sizeof(int), 5, f);
     Mat xn = mat_new(ds.in_len, ds.d_num), xt = mat_new(ds.in_len, ds.d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(ds.pred_len, 2);
     float *row = malloc((size_t)feat * sizeof(float));
     for (int s = 0; s < ds.n_samples; ++s) {
-        dataset_get(&ds, s, xn, xt, yp, Y);
+        dataset_get(&ds, s, xn, xt, yp, Y);           /* coords raw (identity stats here) */
         for (int t = 0; t < ds.in_len; ++t) {
             memcpy(row, &xn.data[t * ds.d_num], ds.d_num * sizeof(float));
             memcpy(row + ds.d_num, &xt.data[t * ds.d_text], ds.d_text * sizeof(float));
             fwrite(row, sizeof(float), feat, f);
         }
         fwrite(Y.data, sizeof(float), (size_t)ds.pred_len * out_dim, f);
+        fwrite(yp.data, sizeof(float), 2, f);          /* seed coordinate */
     }
     fclose(f);
-    printf("wrote %s: %d samples, in_len=%d, feat=%d, pred_len=%d\n", out, ds.n_samples, ds.in_len, feat, ds.pred_len);
+    printf("wrote %s (TFB2): %d samples, in_len=%d, feat=%d, pred_len=%d\n", out, ds.n_samples, ds.in_len, feat, ds.pred_len);
     free(row); mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); dataset_free(&ds);
     return 0;
 }
@@ -269,6 +304,7 @@ static int cmd_predict(int argc, char **argv) {
     }
     Config c = checkpoint_load_config(weights);
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
+    apply_ckpt_stats(&ds, weights);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     checkpoint_load_params(weights, &pl);
@@ -280,13 +316,16 @@ static int cmd_predict(int argc, char **argv) {
     for (int s = 0; s < n; ++s) {
         dataset_get(&ds, s, xn, xt, yp, Y);
         model_forward(&m, xn, xt, yp);
+        float seed[2] = { yp.data[0], yp.data[1] };
+        dataset_denorm(&ds, seed);                       /* all outputs in degrees */
         for (int h = 0; h < c.pred_len; ++h) {
-            float pl_lat = m.pred.data[h * 2], pl_lon = m.pred.data[h * 2 + 1];
-            float t_lat = Y.data[h * 2], t_lon = Y.data[h * 2 + 1];
+            float p[2] = { m.pred.data[h * 2], m.pred.data[h * 2 + 1] };
+            float t[2] = { Y.data[h * 2],       Y.data[h * 2 + 1] };
+            dataset_denorm(&ds, p); dataset_denorm(&ds, t);
             fprintf(f, "%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f\n",
-                    s, (h + 1) * 6, yp.data[0], yp.data[1], t_lat, t_lon, pl_lat, pl_lon,
-                    haversine(pl_lat, pl_lon, t_lat, t_lon),
-                    haversine(yp.data[0], yp.data[1], t_lat, t_lon));
+                    s, (h + 1) * 6, seed[0], seed[1], t[0], t[1], p[0], p[1],
+                    haversine(p[0], p[1], t[0], t[1]),
+                    haversine(seed[0], seed[1], t[0], t[1]));
         }
     }
     fclose(f);
