@@ -113,7 +113,30 @@ result — five splits, and a model that actually forecasts well — and it stil
 says the GPT-4o/MiniLM language branch, the paper's central premise, provides no
 benefit on this data. If anything it adds a little noise.
 
-## 7. What this means
+## 7. The encoder is not the bottleneck
+
+With the model fixed (`--motion --delta`), we swept the encoder architecture one
+option at a time, each across three storm-split seeds (held-out test ΔR, km):
+
+| encoder variant | seed 1 | seed 3 | seed 5 | mean |
+|:--|:--:|:--:|:--:|:--:|
+| base (`--motion --delta`) | 47.2 | 51.9 | 50.6 | 49.9 |
+| `--no_spatial` (drop dead N=1 blocks) | 54.4 | 49.8 | 48.4 | 50.9 |
+| `--posenc` (learned positional encoding) | 47.9 | 51.2 | 49.2 | 49.5 |
+| `--pool=last` (recency pooling) | 51.3 | 56.3 | 47.7 | 51.8 |
+| `--prenorm` (pre-norm blocks) | 52.6 | 52.9 | 48.5 | 51.3 |
+| all four together | 47.1 | 47.0 | 49.2 | **47.7** |
+
+Every single-option mean sits inside the ±3 km split-to-split noise of the base
+— none is a real improvement. Stacking all four is marginally the best (47.7 vs
+49.9), but still within noise, and it costs a learned positional table. The
+honest read: **the encoder architecture is not what limits this model.** Once
+motion is in the inputs and the head predicts displacement, the remaining error
+is dominated by the data (98 storms) and the intrinsic hardness of the horizon,
+not by how the 12-step context is mixed. `--no_spatial` is worth keeping anyway
+— it drops parameters whose Q/K never train, at no accuracy cost.
+
+## 8. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
