@@ -318,4 +318,4 @@ This work is supported in part by the start-up grant and the FYAP grant program 
 
 ## 📜 License
 
-No formal license file is currently included in this repository. The code and data are shared for **academic, non-commercial research**; please contact the authors regarding other uses.
+This repository is a **fork** of [LabRAI/TyphoFormer](https://github.com/LabRAI/TyphoFormer). The code, model, and paper are the work of the original authors (Li *et al.*, ACM SIGSPATIAL 2025). This fork does not add or alter licensing — refer to the [original repository](https://github.com/LabRAI/TyphoFormer) for its license terms, and obtain any necessary permissions from the original authors before reuse.

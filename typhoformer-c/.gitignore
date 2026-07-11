@@ -1,0 +1,5 @@
+# build artifacts
+*.o
+src/*.o
+tests/test_tensor
+*.out
