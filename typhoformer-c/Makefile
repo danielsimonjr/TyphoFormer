@@ -1,7 +1,19 @@
 # TyphoFormer-C — pure C, standard library only.
 CC      ?= gcc
-CFLAGS  := -std=c11 -O3 -Wall -Wextra -Wpedantic -Iinclude
+OPT     ?= -O3
+CFLAGS  := -std=c11 $(OPT) -Wall -Wextra -Wpedantic -Iinclude
 LDLIBS  := -lm
+
+# Opt-in native SIMD (non-portable binary; source stays pure C):  make NATIVE=1
+ifeq ($(NATIVE),1)
+CFLAGS  += -march=native -funroll-loops
+endif
+
+# Sanitizer build for tests:  make SAN=1 test
+ifeq ($(SAN),1)
+CFLAGS  += -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+LDLIBS  += -fsanitize=address,undefined
+endif
 
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)

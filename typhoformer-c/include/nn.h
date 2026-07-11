@@ -54,7 +54,8 @@ void      layernorm_free(LayerNorm *ln);
 typedef struct {
     Linear fc1, fc2;
     int    d, f;
-    Mat    h, a;      /* pre/post activation caches [T,F] */
+    Mat    h, a;          /* pre/post activation caches [T,F] */
+    Mat    s_da, s_dh;    /* backward scratch [T,F] */
 } FFN;
 
 FFN  ffn_new(int d, int f, ParamList *pl, const char *name);
@@ -71,6 +72,8 @@ typedef struct {
     Mat    Q, K, V, Ocat;   /* [S,D] caches */
     Mat   *P;               /* n_heads x [S,S] attention weights */
     int    Scap;
+    Mat    s_dOcat, s_dQ, s_dK, s_dV, s_dxq, s_dxk;  /* backward scratch [S,D] */
+    Mat    s_dP, s_dsc;                              /* backward scratch [S,S] */
 } MHA;
 
 MHA  mha_new(int d_model, int n_heads, int self_only, ParamList *pl, const char *name);
@@ -85,6 +88,7 @@ typedef struct {
     FFN       ff;
     int       d;
     Mat       attn_out, r1, y1, ff_out, r2;   /* caches */
+    Mat       s_dr2, s_dy1, s_dr1, s_dtmp;     /* backward scratch [S,D] */
 } Block;
 
 Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *pl, const char *name);
