@@ -1,0 +1,36 @@
+name: typhoformer-c CI
+
+on:
+  push:
+    paths:
+      - 'typhoformer-c/**'
+      - '.github/workflows/c-ci.yml'
+  pull_request:
+    paths:
+      - 'typhoformer-c/**'
+      - '.github/workflows/c-ci.yml'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typhoformer-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (portable -O3)
+        run: make
+
+      - name: Unit tests (gradient checks + data loader)
+        run: make test
+
+      - name: Sanitizer tests (AddressSanitizer + UBSan)
+        run: make test-san
+
+      - name: Smoke test (train 1 epoch + eval + prepare)
+        run: |
+          make
+          ./typhoformer 1 --save=/tmp/m.ckpt
+          ./typhoformer eval --weights=/tmp/m.ckpt
+          ./typhoformer prepare --out=/tmp/data.tfb

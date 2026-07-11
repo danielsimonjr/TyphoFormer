@@ -5,8 +5,18 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+_Noreturn void die(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    exit(1);
+}
 
 Mat mat_new(int rows, int cols) {
     assert(rows > 0 && cols > 0);
