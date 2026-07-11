@@ -244,7 +244,7 @@ make && ./typhoformer 30               # train (compact config) on the bundled d
 ./typhoformer prepare --out=data.tfb            # build a windowed dataset from CSV + embeddings
 ```
 
-See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, all subcommands and flags, the `tools/` preprocessing scripts, and the `.npy` → `.tfb` data converter.
+See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, all subcommands and flags, the `tools/` preprocessing scripts, and the `.npy` → `.tfb` data converter. In-depth documentation for students and engineers — the full backprop math, API reference, integration guide, and extension guide — is in [`typhoformer-c/docs/`](typhoformer-c/docs/).
 
 ## 📁 Repository Structure
 
@@ -268,6 +268,7 @@ TyphoFormer/
 │   │   ├── gen_descriptions.py         #     GPT-4o descriptions
 │   │   ├── gen_embeddings.py           #     MiniLM embeddings
 │   │   └── npy_dict_to_bin.py          #     .npy-dict → .tfb converter
+│   ├── docs/                           #   architecture/math, API, integration, extending
 │   ├── Makefile  LICENSE  README.md    #   `make test` / `make && ./typhoformer`
 │
 ├── legacy/                             # 🗄️ Original PyTorch implementation (see legacy/README.md)
