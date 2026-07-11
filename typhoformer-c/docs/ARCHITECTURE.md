@@ -294,9 +294,10 @@ With `pred_len = 1` the feedback term vanishes and this reduces to the
 single-step case. The whole thing is finite-difference checked at `pred_len = 3`
 in `tests/test_model.c`.
 
-**Delta mode (`--delta`, `model_set_delta`).** By default `ŷ_s = fc2(a_s)` is an
-*absolute* coordinate — the model has to reconstruct the whole position every
-step. In delta mode it instead predicts the **displacement**:
+**Displacement head (delta mode; `--delta`, `model_set_delta`).** By default
+`ŷ_s = fc2(a_s)` is an *absolute* coordinate — the model has to reconstruct the
+whole position every step. As a **displacement head** it instead predicts the
+change from the previous coordinate:
 
 ```
 ŷ_s = ŷ_{s-1} + fc2(a_s)        # residual: previous coord + learned Δ

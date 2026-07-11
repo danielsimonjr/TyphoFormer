@@ -89,8 +89,8 @@ config, 30 epochs, early stopping):
 
 - **`--motion`** (add `lat, lon, Δlat, Δlon` to the inputs) is the dominant fix:
   it hands the model the signal constant-velocity already uses. Mean ΔR 128 → 79.
-- **`--delta`** (decoder predicts the displacement from the seed, `fc2`
-  zero-initialised so it *starts* at persistence) roughly halves the error again
+- **`--delta`** (the **displacement head**: the decoder predicts the change from
+  the seed, `fc2` zero-initialised so it *starts* at persistence) halves the error again
   and — just as important — **collapses the variance** (std 27 → 3 km): every
   split now lands in 44–53 km. Starting from a sensible prior and learning the
   correction is far more stable than regressing absolute coordinates.

@@ -131,11 +131,11 @@ added to the model input (`--motion`). By default the inputs are intensity only,
 so the model is blind to how the storm is moving; adding motion is the single
 biggest improvement to forecast skill. Code: `dataset_add_motion`, `src/data.c`.
 
-**Delta / displacement prediction** — having the decoder output the *change* from
-the previous coordinate (`ŷ_t = ŷ_{t-1} + Δ`) instead of the absolute position,
-with the output layer zero-initialised so it starts at persistence and learns the
-correction (`--delta`). Improves accuracy and stability. Code: `model_set_delta`,
-`decoder_forward`.
+**Displacement head (delta mode)** — a decoder that outputs the *change* from the
+previous coordinate (`ŷ_t = ŷ_{t-1} + Δ`) instead of the absolute position, with
+the output layer zero-initialised so it starts at persistence and learns the
+correction (`--delta`). Improves accuracy and collapses cross-split variance.
+Code: `model_set_delta`, `decoder_forward`. (Also called a residual head.)
 
 **km-aware loss** — weighting the longitude error by `cos²(latitude)` so the
 training objective approximates squared kilometres (a degree of longitude is

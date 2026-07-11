@@ -40,9 +40,10 @@ int main(void) {
     // 1. Rebuild the model from the checkpoint's config header, then load weights.
     Config c = checkpoint_load_config("model.ckpt");
     ParamList pl; plist_init(&pl);
-    // If the checkpoint was trained with --delta, call model_set_delta(1) here,
-    // BEFORE model_new. If trained with --motion, c.d_num is 18 (not 14) and you
-    // must feed lat,lon,Δlat,Δlon in the last 4 columns — size xnum from c.d_num.
+    // If the checkpoint used the displacement head (--delta), call
+    // model_set_delta(1) here, BEFORE model_new. If trained with --motion,
+    // c.d_num is 18 (not 14) and you must feed lat,lon,Δlat,Δlon in the last 4
+    // columns — always size xnum from c.d_num.
     Model m = model_new(&c, &pl);
     checkpoint_load_params("model.ckpt", &pl);
 
