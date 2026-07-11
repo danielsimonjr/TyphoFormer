@@ -98,6 +98,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
+| `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Serial path only (`--threads=1`); supersedes `--delta`. | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
 | `--no_spatial` | Drop the degenerate N=1 spatial encoder blocks (their Q/K never train). | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |

@@ -74,13 +74,15 @@ void model_set_pool_last(int on);    /* pool by taking the last step, not TimeMi
 /* ---- Autoregressive decoder ----------------------------------------- */
 typedef struct {
     Linear fc1, fc2;
-    int    hidden, out, max_steps;
+    int    hidden, out, max_steps, use_cv;
     Mat   *zc, *h1c, *ac;               /* per-step caches (autoregressive rollout) */
-    Mat    s_yt, s_a, s_ytn;            /* forward scratch */
-    Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dhacc;  /* backward scratch */
+    Mat    s_yt, s_a, s_ytn, s_v;       /* forward scratch (s_v: cv velocity) */
+    Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dvnext, s_dhacc;  /* backward scratch */
 } Decoder;
 Decoder decoder_new(const Config *c, ParamList *pl);
-void    decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat preds);
+/* vseed is the seed velocity (normalized coord units); used only in cv mode and
+ * may be a NULL matrix otherwise. */
+void    decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vseed, int steps, Mat preds);
 void    decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc);   /* steps==1 */
 void    decoder_free(Decoder *d);
 
@@ -90,6 +92,15 @@ void    decoder_free(Decoder *d);
  * BEFORE building the model. Off by default. */
 void    model_set_delta(int on);
 int     model_delta(void);
+
+/* Constant-velocity decoder: a second-order extension of delta. The rollout is
+ * anchored at constant-velocity extrapolation (ŷ_t = y_{t-1} + v + fc2(...)),
+ * with v threaded across steps (v_{t+1} = v_t + correction) and fc2 zero-init,
+ * so an untrained model starts *at the CLIPER baseline* and learns only the
+ * curvature correction. The decoder also takes the seed velocity as input. Set
+ * BEFORE building the model; feed each sample's seed velocity with
+ * model_set_seed_velocity. Off by default; takes precedence over --delta. */
+void    model_set_cv(int on);
 
 /* ---- Co-active spatial cross-attention ------------------------------ */
 /* The encoded context attends over the relative states of storms active at the
@@ -114,10 +125,12 @@ typedef struct {
     CoSpatial co;
     int       use_co;
     Mat       nbr;  int nbr_cnt;       /* current sample's neighbours    */
+    Mat       vseed;                   /* current sample's seed velocity (cv mode) */
     Mat       xtilde, henc, henc2, dhenc, dhenc2, dxtilde, pred;
 } Model;
 Model model_new(const Config *c, ParamList *pl);
 void  model_set_neighbors(Model *m, const Mat nbr, int cnt);   /* set before model_forward */
+void  model_set_seed_velocity(Model *m, const Mat v);          /* set before model_forward (cv) */
 void  model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev); /* -> m->pred */
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);
 void  model_free(Model *m);

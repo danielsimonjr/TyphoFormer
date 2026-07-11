@@ -80,6 +80,10 @@ void dataset_add_motion(Dataset *d);
 void dataset_build_neighbors(Dataset *d);
 void dataset_neighbors(const Dataset *d, int s, Mat nbrmat, int *cnt);
 
+/* Seed velocity (last observed displacement) for sample s, in normalized coord
+ * units. Fills vout[1,2]; zero for the pre-windowed path (no coord history). */
+void dataset_seed_velocity(const Dataset *d, int s, Mat vout);
+
 /* Fit feature + coordinate normalization on the TRAIN storms only (per
  * d->storm_split) and apply the feature z-score to d->num in place. Coordinate
  * stats are stored and applied on the fly in dataset_get. */
