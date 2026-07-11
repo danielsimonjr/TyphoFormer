@@ -60,6 +60,13 @@ typedef struct {
 Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed);
 void  split_free(Split *s);
 
+/* Append motion features to the input: per record, the (raw) position lat, lon
+ * and the step-to-step velocity dlat, dlon (0 at a storm's first record). This
+ * gives the model the trajectory signal it otherwise never sees. Increases
+ * d->d_num by 4. Call BEFORE dataset_standardize. No-op for the .tfb path (it
+ * carries no coordinate history). */
+void dataset_add_motion(Dataset *d);
+
 /* Fit feature + coordinate normalization on the TRAIN storms only (per
  * d->storm_split) and apply the feature z-score to d->num in place. Coordinate
  * stats are stored and applied on the fly in dataset_get. */

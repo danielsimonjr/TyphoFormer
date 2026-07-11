@@ -73,6 +73,13 @@ void    decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, 
 void    decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc);   /* steps==1 */
 void    decoder_free(Decoder *d);
 
+/* Delta mode: the decoder predicts the DISPLACEMENT from the seed instead of the
+ * absolute coordinate (y_t = y_{t-1} + fc2(...)), with fc2 zero-initialised so
+ * an untrained model starts at persistence and only learns the correction. Set
+ * BEFORE building the model. Off by default. */
+void    model_set_delta(int on);
+int     model_delta(void);
+
 /* ---- Full model ----------------------------------------------------- */
 typedef struct {
     Config  cfg;

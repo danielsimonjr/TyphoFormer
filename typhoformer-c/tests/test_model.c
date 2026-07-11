@@ -20,13 +20,15 @@ static double loss_only(void) {
     return model_loss(M.pred, Y, M.pgf.gate, LAMBDA, none, none);
 }
 
-static int check_model(int pred_len) {
-    printf("[model gradient check, pred_len=%d]\n", pred_len);
+static int check_model(int pred_len, int delta) {
+    printf("[model gradient check, pred_len=%d, delta=%d]\n", pred_len, delta);
     Config c; c.d_num = 3; c.d_text = 5; c.d_model = 8; c.out_dim = 2;
     c.in_len = 4; c.pred_len = pred_len; c.d_ff = 16; c.n_heads = 2; c.n_layers = 1;
 
     plist_init(&pl);
+    model_set_delta(delta);
     M = model_new(&c, &pl);
+    model_set_delta(0);
 
     xnum  = mat_new(c.in_len, c.d_num);
     xtext = mat_new(c.in_len, c.d_text);
@@ -43,8 +45,10 @@ static int check_model(int pred_len) {
     plist_zero_grad(&pl);
     model_backward(&M, dpred, dgate);
 
-    const float eps = 1e-3f, floor = 1e-2f;
-    float max_err = 0.0f, max_abs = 0.0f; long checked = 0;
+    /* eps=1e-4 keeps the ± perturbation off the ReLU kink; tolerate a few
+     * kink-affected outliers (see tests/test_nn.c for the rationale). */
+    const float eps = 1e-4f, floor = 1e-2f, REL = 2e-2f, ABS = 3e-3f;
+    float max_err = 0.0f, max_abs = 0.0f; long checked = 0; int bad = 0;
     for (int p = 0; p < pl.count; ++p)
         for (int e = 0; e < pl.item[p].n; ++e) {
             float *w = &pl.item[p].v[e], save = *w;
@@ -56,13 +60,14 @@ static int check_model(int pred_len) {
             float err = abserr / (fabsf(g) + fabsf(a) + floor);
             if (err > max_err) max_err = err;
             if (abserr > max_abs) max_abs = abserr;
+            if (err >= REL && abserr >= ABS) ++bad;
             ++checked;
         }
 
-    printf("  params: %ld (checked %ld) | max rel err = %.2e, max abs err = %.2e\n",
-           plist_num_params(&pl), checked, max_err, max_abs);
-    int fail = (max_err >= 2e-2f && max_abs >= 1e-3f);
-    if (fail) printf("  FAIL: model gradients\n"); else printf("  ok\n");
+    printf("  params: %ld (checked %ld) | max rel err = %.2e, max abs err = %.2e | outliers = %d\n",
+           plist_num_params(&pl), checked, max_err, max_abs, bad);
+    int fail = (bad > 3);
+    if (fail) printf("  FAIL: model gradients (%d disagree)\n", bad); else printf("  ok\n");
 
     model_free(&M); plist_free(&pl);
     mat_free(&xnum); mat_free(&xtext); mat_free(&yprev); mat_free(&Y);
@@ -73,8 +78,10 @@ static int check_model(int pred_len) {
 int main(void) {
     nn_seed(7);
     int fail = 0;
-    fail |= check_model(1);   /* single-step */
-    fail |= check_model(3);   /* multi-step autoregressive rollout */
+    fail |= check_model(1, 0);   /* single-step, absolute */
+    fail |= check_model(3, 0);   /* multi-step autoregressive rollout */
+    fail |= check_model(1, 1);   /* single-step, delta decoder */
+    fail |= check_model(3, 1);   /* multi-step, delta decoder */
     if (!fail) printf("\nmodel gradient check passed\n");
     return fail;
 }
