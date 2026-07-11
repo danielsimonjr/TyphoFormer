@@ -145,7 +145,8 @@ checkpoint.
 ### Lab C4 — Guard against regressions
 **Goal:** make correctness non-negotiable in CI.
 **Files:** `tests/test_golden.c`, `.github/workflows/c-ci.yml`.
-**Steps:** after any change, confirm the golden loss (43.21483) is unchanged for
+**Steps:** after any change, confirm the golden loss (see `GOLDEN_LOSS` in
+`tests/test_golden.c`) is unchanged for
 the serial path; if you *intend* to change numerics, update the constant and
 explain why in the commit.
 **Check:** `make test` and `make test-san` green under both gcc and clang; the

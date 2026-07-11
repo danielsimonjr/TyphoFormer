@@ -1,5 +1,5 @@
 /*
- * optim.h — Adam optimizer over a ParamList (with L2 weight decay).
+ * optim.h — AdamW optimizer over a ParamList (decoupled weight decay).
  */
 #ifndef TYPHOFORMER_OPTIM_H
 #define TYPHOFORMER_OPTIM_H

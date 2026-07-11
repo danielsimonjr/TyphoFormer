@@ -10,6 +10,7 @@ tests/test_module
 tests/test_parallel
 tests/test_checkpoint
 tests/test_npy
+tests/test_dropout
 typhoformer
 backends/opencl/test_opencl
 ._test_*.tmp
@@ -17,5 +18,6 @@ backends/opencl/test_opencl
 *.bin
 *.out
 *.ckpt
+*.opt
 *.tfb
 *.a

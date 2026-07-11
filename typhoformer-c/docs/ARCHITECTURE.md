@@ -162,20 +162,31 @@ backward: da = fc2.backward(dy)
 ### 3.7 Transformer block (post-norm) — `block_forward` / `block_backward`
 
 ```
-a  = MHA(x)
-r1 = x + a;    y1 = LN1(r1)         # attention sublayer + residual + norm
-f  = FFN(y1)
-r2 = y1 + f;   y  = LN2(r2)         # FFN sublayer + residual + norm
+a  = Dropout(MHA(x))
+r1 = x + a;    y1 = LN1(r1)         # attention sublayer + dropout + residual + norm
+f  = Dropout(FFN(y1))
+r2 = y1 + f;   y  = LN2(r2)         # FFN sublayer + dropout + residual + norm
 ```
 
-Backward — note how each residual **adds** a gradient path:
+**Dropout** (rate `p`, default 0.1) is applied to each sublayer's output before
+the residual add, matching the legacy PyTorch. It is active only in training
+mode (`nn_set_training(1)`); at eval/inference it is the identity, so results are
+deterministic. Its mask is cached in the forward pass and re-applied in the
+backward pass; the dropout RNG is thread-local (seeded per worker) so multicore
+training is race-free.
+
+Backward — each residual **adds** a gradient path, and dropout multiplies its
+sublayer's gradient by the cached 0/(1/(1-p)) mask:
 
 ```
 dr2 = LN2.backward(dy)
-dy1 = dr2 + FFN.backward(dr2)        # residual path (dr2) + through the FFN
+dy1 = dr2 + FFN.backward(mask2 ⊙ dr2)   # residual path (dr2) + dropped FFN path
 dr1 = LN1.backward(dy1)
-dx  = dr1 + MHA.backward(dr1)        # residual path (dr1) + through attention
+dx  = dr1 + MHA.backward(mask1 ⊙ dr1)   # residual path (dr1) + dropped attention path
 ```
+
+The encoder stacks these blocks **alternating temporal→spatial within each
+layer** (paper Algorithm 1), then pools time with TimeMix.
 
 If you forget either `+ dr2` / `+ dr1` (the residual contributions), the
 gradient check in `tests/test_nn.c` fails immediately — a good exercise.
@@ -294,21 +305,25 @@ dg_pen  = λ·(−2/N_g)·max(0, τ − g)               # → straight into the
 `dg_pen` is exactly the "second path into `g`" from §2. It is `0` wherever
 `g ≥ τ`.
 
-### 4.5 Optimizer — Adam (`adam_step`)
+### 4.5 Optimizer — AdamW (`adam_step`)
 
-For every scalar parameter `w` with gradient `g` (plus L2 weight decay `wd`):
+For every scalar parameter `w` with gradient `g` and **decoupled** weight decay
+`wd`:
 
 ```
-g      ← g + wd·w
 m      ← β1·m + (1−β1)·g            (β1 = 0.9)
 v      ← β2·v + (1−β2)·g²           (β2 = 0.999)
 m̂      = m / (1 − β1ᵗ)              # bias correction, t = step count
 v̂      = v / (1 − β2ᵗ)
-w      ← w − lr·m̂ / (√v̂ + ε)        (lr = 1e-3, ε = 1e-8)
+w      ← w − lr·( m̂ / (√v̂ + ε) + wd·w )   (lr = 1e-3, ε = 1e-8)
 ```
 
-Adam iterates the `ParamList`, so it is completely decoupled from the model
-architecture — see [API.md](API.md) §ParamList.
+The weight decay is **decoupled** (AdamW): it acts on `w` directly rather than
+being folded into `g` before the moments, so it does not interact with the
+adaptive `1/√v̂` term. Before the step, the training loop clips the global
+gradient L2 norm (`--clip`, default 1.0) and scales the learning rate by a linear
+warmup factor (`--warmup`). Adam iterates the `ParamList`, so it is completely
+decoupled from the model architecture — see [API.md](API.md) §ParamList.
 
 ---
 

@@ -23,12 +23,14 @@ void adam_step(Adam *a, ParamList *pl) {
     for (int p = 0; p < pl->count; ++p) {
         float *v = pl->item[p].v, *g = pl->item[p].g;
         for (int e = 0; e < pl->item[p].n; ++e, ++idx) {
-            float grad = g[e] + a->wd * v[e];              /* L2 weight decay */
+            float grad = g[e];                             /* raw gradient */
             a->fm[idx] = a->b1 * a->fm[idx] + (1.0f - a->b1) * grad;
             a->sm[idx] = a->b2 * a->sm[idx] + (1.0f - a->b2) * grad * grad;
             float mhat = (float)(a->fm[idx] / bc1);
             float vhat = (float)(a->sm[idx] / bc2);
-            v[e] -= a->lr * mhat / (sqrtf(vhat) + a->eps);
+            /* AdamW: decoupled weight decay (decay the parameter directly, not
+             * the gradient — so it does not interact with the adaptive term). */
+            v[e] -= a->lr * (mhat / (sqrtf(vhat) + a->eps) + a->wd * v[e]);
         }
     }
 }

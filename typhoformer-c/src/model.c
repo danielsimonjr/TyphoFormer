@@ -82,6 +82,7 @@ TimeMix timemix_new(int in_steps, int out_steps, ParamList *pl) {
     t.dc = (float *)calloc(out_steps, sizeof(float));
     float k = 1.0f / (float)in_steps;
     for (int i = 0; i < out_steps * in_steps; ++i) t.A.data[i] = nn_uniform(-k, k);
+    for (int i = 0; i < out_steps; ++i) t.c[i] = nn_uniform(-k, k);   /* bias like nn.Linear */
     t.xcache = NULLMAT; t.s_tmp = NULLMAT;
     plist_add(pl, t.A.data, t.dA.data, out_steps * in_steps, "timemix.A");
     plist_add(pl, t.c, t.dc, out_steps, "timemix.c");
@@ -133,8 +134,11 @@ void encoder_forward(Encoder *e, const Mat xtilde, Mat henc) {
     const int L = e->cfg.n_layers;
     Mat cur = e->b0, nxt = e->b1, tmp;
     linear_forward(&e->input_proj, xtilde, cur);
-    for (int l = 0; l < L; ++l) { block_forward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
-    for (int l = 0; l < L; ++l) { block_forward(&e->spatial[l],  cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
+    /* paper-faithful: alternate temporal then spatial WITHIN each layer */
+    for (int l = 0; l < L; ++l) {
+        block_forward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
+        block_forward(&e->spatial[l],  cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
+    }
     timemix_forward(&e->tmix, cur, e->tmid);          /* [1,D] */
     linear_forward(&e->output_proj, e->tmid, henc);   /* [1,D] */
 }
@@ -143,8 +147,10 @@ void encoder_backward(Encoder *e, const Mat dhenc, Mat dxtilde) {
     linear_backward(&e->output_proj, dhenc, e->dtmid);
     Mat cur = e->db0, nxt = e->db1, tmp;
     timemix_backward(&e->tmix, e->dtmid, cur);
-    for (int l = L - 1; l >= 0; --l) { block_backward(&e->spatial[l],  cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
-    for (int l = L - 1; l >= 0; --l) { block_backward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
+    for (int l = L - 1; l >= 0; --l) {
+        block_backward(&e->spatial[l],  cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
+        block_backward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
+    }
     linear_backward(&e->input_proj, cur, dxtilde);
 }
 void encoder_free(Encoder *e) {

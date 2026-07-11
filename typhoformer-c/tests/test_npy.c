@@ -12,7 +12,44 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+/* Returns 1 if npy_load_2d accepts the file. Runs in a child because a rejected
+ * file calls die()/exit(1); the child's stderr is silenced. */
+static int loads_ok(const char *path) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        FILE *n = freopen("/dev/null", "w", stderr); (void)n;
+        int rr, cc; float *d = npy_load_2d(path, &rr, &cc); free(d); _exit(0);
+    }
+    int st; waitpid(pid, &st, 0);
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+#endif
+
 #define NPY "._test_arr.tmp.npy"
+
+/* Write a minimal v1.0 .npy with a caller-chosen descr/fortran flag. */
+static void write_npy_hdr(const char *path, const char *descr, const char *fortran,
+                          int r, int c, const float *data, int nbytes_elem) {
+    char dict[128];
+    snprintf(dict, sizeof dict,
+             "{'descr': '%s', 'fortran_order': %s, 'shape': (%d, %d), }", descr, fortran, r, c);
+    int base = 10 + (int)strlen(dict) + 1;
+    int pad = (64 - (base % 64)) % 64;
+    int hlen = (int)strlen(dict) + 1 + pad;
+    FILE *f = fopen(path, "wb");
+    if (!f) { die("cannot write %s", path); }
+    unsigned char pre[10] = {0x93, 'N','U','M','P','Y', 1, 0,
+                             (unsigned char)(hlen & 0xff), (unsigned char)(hlen >> 8)};
+    fwrite(pre, 1, 10, f);
+    fwrite(dict, 1, strlen(dict), f);
+    for (int i = 0; i < pad; ++i) fputc(' ', f);
+    fputc('\n', f);
+    if (data) fwrite(data, (size_t)nbytes_elem, (size_t)r * c, f);
+    fclose(f);
+}
 
 /* Write a minimal float32 v1.0 .npy with the given shape and row-major data. */
 static void write_npy(const char *path, int r, int c, const float *data) {
@@ -50,6 +87,19 @@ int main(void) {
         if (got[i] != src[i]) { printf("FAIL: npy value[%d] %g != %g\n", i, got[i], src[i]); fail = 1; }
     free(got);
     remove(NPY);
+
+#ifndef _WIN32
+    /* ---- 1b. dtype / fortran_order validation (must be rejected) ---- */
+    write_npy_hdr(NPY, "<f4", "False", R, C, src, 4);
+    if (!loads_ok(NPY)) { printf("FAIL: valid <f4 npy rejected\n"); fail = 1; }
+    write_npy_hdr(NPY, ">f4", "False", R, C, NULL, 4);   /* big-endian */
+    if (loads_ok(NPY))  { printf("FAIL: big-endian >f4 accepted\n"); fail = 1; }
+    write_npy_hdr(NPY, "<f8", "False", R, C, NULL, 8);   /* float64 */
+    if (loads_ok(NPY))  { printf("FAIL: float64 <f8 accepted\n"); fail = 1; }
+    write_npy_hdr(NPY, "<f4", "True", R, C, NULL, 4);    /* fortran order */
+    if (loads_ok(NPY))  { printf("FAIL: fortran_order=True accepted\n"); fail = 1; }
+    remove(NPY);
+#endif
 
     /* ---- 2. split determinism + partition ---- */
     Dataset d; memset(&d, 0, sizeof d);

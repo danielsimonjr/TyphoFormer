@@ -17,6 +17,7 @@ typedef struct {
     const int     *idx;
     int   start, count;
     float lambda;
+    unsigned long dseed;   /* per-worker dropout RNG state, threaded across batches */
     double loss;       /* out: summed loss over this worker's shard */
     pthread_t tid;
 } Worker;
@@ -46,6 +47,7 @@ ParTrainer *partrainer_new(const Config *cfg, int n_workers) {
         w->Y     = mat_new(c->pred_len, 2);
         w->dpred = mat_new(c->pred_len, c->out_dim);
         w->dgate = mat_new(c->in_len, c->d_model);
+        w->dseed = 0x100000001b3UL * (unsigned long)(i + 1) + 1;   /* distinct per worker */
     }
     return pt;
 }
@@ -79,6 +81,7 @@ void partrainer_broadcast(ParTrainer *pt, const ParamList *master) {
 
 static void *worker_run(void *arg) {
     Worker *w = (Worker *)arg;
+    nn_dropout_seed(w->dseed);      /* per-thread dropout RNG (race-free) */
     plist_zero_grad(&w->pl);
     w->loss = 0.0;
     for (int k = 0; k < w->count; ++k) {
@@ -90,6 +93,7 @@ static void *worker_run(void *arg) {
                               w->dpred, w->dgate);
         model_backward(&w->model, w->dpred, w->dgate);
     }
+    w->dseed = nn_dropout_state();   /* advance so masks differ across batches */
     return NULL;
 }
 

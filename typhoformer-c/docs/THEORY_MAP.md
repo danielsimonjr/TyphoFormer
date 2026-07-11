@@ -36,14 +36,16 @@ loss = MSE(ŷ, Y) + λ·gate-penalty
 | **Multi-head split/merge** | per-head `Q,K,V`; concat then `Wₒ` | `mha_forward` | `mha_backward` |
 | **Single-node ("self-only") spatial attention** | `A = I` (each position attends to itself) | `mha_forward` (`self_only=1`) | `mha_backward` |
 | **Feed-forward network** | `Linear→ReLU→Linear` | `ffn_forward` `src/nn.c` | `ffn_backward` |
-| **Transformer block (post-norm)** | `x→+MHA→LN→+FFN→LN` | `block_forward` `src/nn.c` | `block_backward` |
+| **Transformer block (post-norm)** | `x→+Dropout(MHA)→LN→+Dropout(FFN)→LN` | `block_forward` `src/nn.c` | `block_backward` |
+| **Dropout** | train: `y=mask⊙x`, `mask∈{0,1/(1−p)}`; eval: identity | `dropout_apply` `src/nn.c` | folded into `block_backward` |
 | **Prompt-aware Gating Fusion** | `g = σ(W_g[xₙ;xₜ])`, `x̃ = g⊙xₙ′ + (1−g)⊙xₜ′` | `pgf_forward` `src/model.c` | `pgf_backward` |
 | **TimeMix pooling** | `y = A·x + c`, `[out,in]·[in,D]` | `timemix_forward` `src/model.c` | `timemix_backward` |
 | **Spatio-temporal encoder** | stack temporal+spatial blocks, pool T→1 | `encoder_forward` `src/model.c` | `encoder_backward` |
 | **Autoregressive decoder** | `ŷ_s = f(h_enc, ŷ_{s−1})`, feeding own output | `decoder_forward` `src/model.c` | `decoder_backward` |
 | **Full model** | compose PGF→encoder→decoder | `model_forward` `src/model.c` | `model_backward` |
 | **Loss** | `MSE(ŷ,Y) + λ·mean(relu(0.6−g)²)` | `model_loss` `src/model.c` | (returns `dpred`, `dgate`) |
-| **Adam + weight decay** | `m,v` moments; bias-corrected step | `adam_step` `src/optim.c` | — |
+| **AdamW (decoupled decay)** | `m,v` moments; bias-corrected step; `w−=lr·wd·w` | `adam_step` `src/optim.c` | — |
+| **Gradient clipping** | scale grads if `‖g‖₂ > clip` | `plist_clip_grad_norm` `src/nn.c` | — |
 | **Parameter registry** | flat list bridging optimizer + I/O | `plist_*` `src/nn.c` | — |
 | **Finite-difference gradient check** | `∂L/∂w ≈ (L(w+ε)−L(w−ε))/2ε` | `tests/test_*.c` | (ground truth for all above) |
 

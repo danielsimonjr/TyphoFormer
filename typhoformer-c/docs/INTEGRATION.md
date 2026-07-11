@@ -99,10 +99,18 @@ it implicitly.
 
 ```
 offset  bytes  content
-0       4      magic "TFW1"
+0       4      magic "TFW3"  (also reads legacy "TFW1"/"TFW2")
 4       36     9 × int32 : d_num d_text d_model out_dim in_len pred_len d_ff n_heads n_layers
-40      ...    float32 parameters, concatenated in ParamList registration order
+40      4      int32 n_stats            (0 or d_num)
+44      ...    float32 mean[n_stats], std[n_stats]        (feature normalization)
+..      4      int32 has_coord          (0 or 1)
+..      16     float32 cmean[2], cstd[2]                  (lat/lon normalization)
+..      ...    float32 parameters, concatenated in ParamList registration order
 ```
+
+Training also writes a `.opt` sidecar (magic "TFO1": Adam moments + step + lr +
+epoch) next to the checkpoint; `--resume=CKPT` restores weights and optimizer
+state from it. Inference only needs the `.ckpt`.
 
 The parameter order is defined by the order modules are constructed in
 `model_new` (PGF → Encoder(input_proj, output_proj, then per layer temporal &
@@ -116,15 +124,17 @@ produces a size mismatch** and `die()`s — a useful safety check.
 
 ```
 offset  bytes  content
-0       4      magic "TFB1"
+0       4      magic "TFB2"  (also reads legacy "TFB1")
 4       20     5 × int32 : n_samples in_len feat_dim pred_len out_dim   (feat_dim = 14+384 = 398)
-24      ...    per sample: float32 input[in_len·feat_dim] then float32 target[pred_len·out_dim]
+24      ...    per sample: float32 input[in_len·feat_dim], target[pred_len·out_dim],
+               then (TFB2 only) float32 seed[2]  — the true last-observed coordinate
 ```
 
 `input` interleaves the 14 numerics and 384 embedding dims per step
-(`[num(14) | emb(384)]`). `.tfb` carries no coordinates, so loaders seed the
-decoder with the first target — use the CSV path for the true last-observed seed
-(see the C README).
+(`[num(14) | emb(384)]`). TFB2 stores the real decoder seed, so it is not seeded
+with a target label; legacy TFB1 files fall back to the first target. For a
+leakage-free train/val/test split, prefer the CSV path (the `.tfb` path has no
+storm info and splits by sample).
 
 ### 4.3 Embeddings `.npy`
 

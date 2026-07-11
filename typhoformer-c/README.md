@@ -61,7 +61,9 @@ make test       # build and run all unit tests (gradient checks + data loader)
 ./typhoformer 30 --csv=PATH --emb=DIR
 ```
 
-Requires only a C11 compiler (`gcc`/`clang`) and `make`.
+Requires a C11 compiler (`gcc`/`clang`) and `make`. The core is portable C;
+the data loader uses POSIX directory APIs (`scandir`) with a Windows
+`FindFirstFile` branch provided (compiled on POSIX here, not yet on Windows).
 
 ## Command-line tools
 
@@ -87,11 +89,20 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--d_model= --d_ff= --n_layers= --n_heads= --in_len= --pred_len=` | Architecture overrides. | config |
 | `--batch=` | Minibatch size. | 8 |
 | `--threads=` | **Data-parallel training across N CPU cores** (1 = serial). | 1 |
-| `--lr= --wd= --lambda=` | Learning rate, weight decay, gate-penalty weight. | 1e-3 / 1e-5 / 0.1 |
+| `--lr= --wd= --lambda=` | Learning rate, **AdamW** weight decay, gate-penalty weight. | 1e-3 / 1e-5 / 0.1 |
+| `--dropout=` | Dropout rate (post-attention and post-FFN; off at eval). | 0.1 |
+| `--clip=` | Global-norm gradient clipping (0 = off). | 1.0 |
+| `--warmup=` | Linear LR warmup steps (0 = off). | 0 |
 | `--lr_decay=` | Per-epoch LR multiplier (1.0 = off). | 1.0 |
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
+| `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
+
+Training uses a **leakage-safe** pipeline: whole storms are split into
+train/val/test, feature and coordinate normalization is fit on the **training
+storms only**, and the final number is scored on a **held-out test set** the
+model never saw during training or selection.
 
 Set `--pred_len=N` (N > 1) to forecast multiple 6-hourly steps autoregressively;
 `eval`/`predict` then report **per-horizon** metrics (6h, 12h, 18h, …).
@@ -193,7 +204,8 @@ The unit tests double as the correctness contract for every extension seam:
 | `test_golden` | training loss is bit-stable (deterministic regression guard). |
 | `test_module` | a `Sequential` of pluggable `Module`s backprops correctly. |
 | `test_parallel` | multicore gradient == serial gradient (≈1e-7). |
-| `test_checkpoint`, `test_npy` | checkpoint round-trip (TFW1/TFW2) and `.npy`/split I/O. |
+| `test_checkpoint`, `test_npy` | checkpoint round-trip (TFW1/2/3 + optimizer sidecar), `.npy` dtype/fortran validation, storm-safe split. |
+| `test_dropout` | dropout is identity at eval; its backward (pinned-mask) gradient-checks. |
 | `backends/opencl/test_opencl` | OpenCL kernels match the CPU reference (≤1.2e-7); model runs through OpenCL. |
 
 ## Status — complete
@@ -206,21 +218,33 @@ The unit tests double as the correctness contract for every extension seam:
 - [x] Evaluation (MAE, spherical-distance error) + persistence / CLIPER baselines
 - [x] Multi-step autoregressive decoding + per-horizon metrics
 - [x] `train`/`eval`/`prepare`/`predict`/`baseline`/`bench` subcommands + config CLI
-- [x] Best-checkpoint saving (with normalization stats), LR decay, early stopping
+- [x] **Leakage-safe** data pipeline: storm-level train/val/**test** split, train-only stats
+- [x] Dropout, AdamW (decoupled), gradient clipping, LR warmup, resume from checkpoint
+- [x] Best-checkpoint saving (with feature + coord stats), LR decay, early stopping
 - [x] Pluggable `Module` interface + compute-backend seam (CPU + runnable OpenCL + CUDA)
 - [x] Data-parallel multicore training (pthreads) — gradient-equivalence tested
 - [x] gcc/clang CI matrix, sanitizers, valgrind, golden regression
 
-Every layer is validated by finite-difference gradient checks (tensor core,
-a full transformer block, and the whole model — all at the single-precision
-noise floor). Training on the bundled 5-year sample converges and beats the
-persistence baseline:
+Every layer is validated by finite-difference gradient checks (tensor core, a
+full transformer block, and the whole model — all at the single-precision noise
+floor). On the **held-out test storms** (never seen in training or model
+selection), the compact demo config trains stably but does **not** beat
+persistence:
 
 ```
-epoch  0 (init)  | val MAE 44.53 | val dR 7382.81 km  (persistence 125.70 km)
-epoch 10         | val MAE 0.82  | val dR 129.62 km
-epoch 30         | val MAE 0.51  | val dR  79.41 km    (~37% better than persistence)
+epoch  0 (init) | val dR ~2000 km   (persistence ~103 km on the test storms)
+best (early stop, epoch 14) | val dR  92.0 km
+HELD-OUT TEST   | dR 172.9 km | MAE 1.04   (persistence 102.7 km)
 ```
+
+> **Honesty note.** Earlier versions reported ΔR ≈ 79 km "beating persistence,"
+> but that came from data leakage — normalization was fit on the whole dataset
+> and overlapping windows were split randomly, so validation storms bled into
+> training. With a storm-level split, train-only statistics, and a genuine
+> held-out test set (all now enforced), the honest picture is that the **compact
+> demo does not beat persistence on unseen storms**. Beating it would need the
+> full paper config, more data, and tuning — the point of the fixes is that the
+> number you see is now real.
 
 ## Notes
 
@@ -228,6 +252,7 @@ epoch 30         | val MAE 0.51  | val dR  79.41 km    (~37% better than persist
   embedding chunks from the repository root (`../`).
 - The training binary uses a compact instance of the architecture (smaller
   `d_model`/`d_ff`) for a fast self-contained demo; the full paper
-  configuration (`config_default()`) runs through the identical code path.
-- The decoder is seeded with the last *observed* coordinate (paper faithful),
-  so the reported ΔR is compared against a persistence baseline.
+  configuration (`--full`) runs through the identical code path.
+- The decoder is seeded with the last *observed* coordinate (paper faithful);
+  targets are coordinate-normalized for training and de-normalized to km for
+  metrics.

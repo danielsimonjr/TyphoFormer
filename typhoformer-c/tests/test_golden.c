@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define GOLDEN_LOSS   43.21483
+#define GOLDEN_LOSS   0.02706   /* normalized coords + bias init + T/S alternation + AdamW */
 #define GOLDEN_TOL    1e-4
 
 int main(void) {
@@ -32,8 +32,9 @@ int main(void) {
     c.d_model = 64; c.d_ff = 128; c.n_layers = 2;   /* the compact default */
 
     Dataset ds = dataset_load("../HURDAT_2new_3000.csv", "../embedding_chunks", c.in_len, c.pred_len);
-    int *train, *val, ntr, nva;
-    dataset_split(&ds, 0.15f, 42, &train, &ntr, &val, &nva);
+    Split sp = dataset_split3(&ds, 0.15f, 0.15f, 42);   /* leakage-safe pipeline */
+    dataset_standardize(&ds);
+    int *train = sp.train, ntr = sp.n_train;
 
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
@@ -73,6 +74,6 @@ int main(void) {
                 : "golden regression check passed\n");
 
     mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
-    free(train); free(val); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
+    split_free(&sp); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
     return fail;
 }
