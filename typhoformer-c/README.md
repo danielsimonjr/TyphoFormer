@@ -96,8 +96,15 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--lr_decay=` | Per-epoch LR multiplier (1.0 = off). | 1.0 |
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
+| `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
+| `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
+
+`--no_text` is the key scientific control: it tests whether the GPT-4o/MiniLM
+language branch — the paper's central premise — actually helps versus a
+numbers-only model. Vary `--split_seed` to see how much the held-out number moves
+with the storm partition (a poor-man's cross-validation).
 
 Training uses a **leakage-safe** pipeline: whole storms are split into
 train/val/test, feature and coordinate normalization is fit on the **training

@@ -95,7 +95,8 @@ static int cmd_train(int argc, char **argv) {
     float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f, dropout = 0.1f, clip = 1.0f;
     int patience = 0;                 /* 0 = disabled (early stopping) */
     int warmup = 0;                   /* linear LR warmup steps (0 = off)  */
-    unsigned long seed = 20260711;
+    int no_text = 0;                  /* numbers-only ablation             */
+    unsigned long seed = 20260711, split_seed = 42;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--full"))     full = 1;
@@ -119,6 +120,8 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--clip=", 7))      clip = (float)atof(argv[i] + 7);
         else if (!strncmp(argv[i], "--warmup=", 9))    warmup = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--resume=", 9))    resume = argv[i] + 9;
+        else if (!strcmp(argv[i], "--no_text"))        no_text = 1;
+        else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') epochs = atoi(argv[i]);
@@ -140,12 +143,14 @@ static int cmd_train(int argc, char **argv) {
     /* Leakage-safe: split whole STORMS into train/val/test, then fit feature +
      * coordinate normalization on the TRAIN storms only. (The .tfb path has no
      * storm info, so it splits by sample and standardizes itself.) */
-    Split sp = dataset_split3(&ds, 0.15f, 0.15f, 42);
+    ds.no_text = no_text;
+    Split sp = dataset_split3(&ds, 0.15f, 0.15f, split_seed);
     dataset_standardize(&ds);
     int *train = sp.train, *val = sp.val, *test = sp.test;
     int ntr = sp.n_train, nva = sp.n_val, nte = sp.n_test;
-    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d\n",
-           ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte);
+    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu%s\n",
+           ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed,
+           no_text ? " | NO-TEXT (numbers only)" : "");
 
     if (threads < 1) threads = 1;
     ParamList pl; plist_init(&pl);
@@ -250,11 +255,13 @@ static void apply_ckpt_stats(Dataset *ds, const char *weights) {
 /* ---- eval ----------------------------------------------------------- */
 static int cmd_eval(int argc, char **argv) {
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *weights = DEF_CKPT;
+    int no_text = 0;
     for (int i = 1; i < argc; ++i) {
         if      (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;
         else if (!strncmp(argv[i], "--csv=", 6))      csv = argv[i] + 6;
         else if (!strncmp(argv[i], "--emb=", 6))      emb = argv[i] + 6;
         else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
+        else if (!strcmp(argv[i], "--no_text"))       no_text = 1;
     }
     Config c = checkpoint_load_config(weights);
     printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d\n",
@@ -262,6 +269,7 @@ static int cmd_eval(int argc, char **argv) {
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin && ds.d_text != c.d_text) { die("d_text mismatch (data %d vs model %d)", ds.d_text, c.d_text); }
 
+    ds.no_text = no_text;
     apply_ckpt_stats(&ds, weights);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
