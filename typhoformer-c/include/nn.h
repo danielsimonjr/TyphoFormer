@@ -28,6 +28,12 @@ int  nn_training(void);
  * post-norm. Off by default. Read at block_forward/backward time. */
 void nn_set_prenorm(int on);
 
+/* ALiBi-style relative-distance bias on the (temporal) attention scores:
+ * score[i,j] -= slope_h·|i−j|, giving attention an intrinsic sense of temporal
+ * distance (no new parameters). Applied only to full self-attention (the
+ * temporal blocks), not the single-node spatial path. Off by default. */
+void nn_set_timebias(int on);
+
 /* ---- parameter registry --------------------------------------------- */
 typedef struct { float *v; float *g; int n; const char *name; } Param;
 typedef struct { Param *item; int count, cap; } ParamList;

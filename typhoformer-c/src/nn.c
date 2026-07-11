@@ -49,6 +49,14 @@ static int dropout_on(void) { return g_training && g_dropout > 0.0f; }
 static int g_prenorm = 0;
 void nn_set_prenorm(int on) { g_prenorm = on; }
 
+/* ---- ALiBi temporal-distance bias ----------------------------------- */
+static int g_timebias = 0;
+void nn_set_timebias(int on) { g_timebias = on; }
+/* Standard ALiBi geometric slope for head h of H. */
+static float alibi_slope(int h, int H) {
+    return (float)pow(2.0, -8.0 * (double)(h + 1) / (double)H);
+}
+
 /* ---- ParamList ------------------------------------------------------- */
 void plist_init(ParamList *pl) { pl->item = NULL; pl->count = pl->cap = 0; }
 void plist_add(ParamList *pl, float *v, float *g, int n, const char *name) {
@@ -264,12 +272,13 @@ void mha_forward(MHA *m, const Mat x, Mat y) {
     const float scale = 1.0f / sqrtf((float)hd);
     for (int h = 0; h < H; ++h) {
         const int off = h * hd;
+        const float slope = g_timebias ? alibi_slope(h, H) : 0.0f;   /* ALiBi recency prior */
         Mat P = m->P[h];
         for (int i = 0; i < S; ++i)
             for (int j = 0; j < S; ++j) {
                 float acc = 0.0f;
                 for (int d = 0; d < hd; ++d) acc += m->Q.data[i * D + off + d] * m->K.data[j * D + off + d];
-                P.data[i * S + j] = acc * scale;
+                P.data[i * S + j] = acc * scale - slope * (float)abs(i - j);   /* bias is a constant */
             }
         softmax_rows(P);
         for (int i = 0; i < S; ++i)

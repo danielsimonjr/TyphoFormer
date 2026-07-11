@@ -91,15 +91,33 @@ void    decoder_free(Decoder *d);
 void    model_set_delta(int on);
 int     model_delta(void);
 
+/* ---- Co-active spatial cross-attention ------------------------------ */
+/* The encoded context attends over the relative states of storms active at the
+ * same timestep — real multi-node spatial attention (reuses MHA over a
+ * [1+cnt, D] token sequence). Off by default; enable with model_set_co_spatial
+ * BEFORE model_new, and feed each sample's neighbours with model_set_neighbors. */
+typedef struct {
+    int    nf, d;
+    Linear proj;                       /* neighbour features (NF) -> D  */
+    MHA    attn;                       /* self-attention over [1+cnt, D] */
+    Mat    tok, seq, out, dmha, dseq;  /* scratch */
+    int    cnt;                        /* cached neighbour count         */
+} CoSpatial;
+void model_set_co_spatial(int on);
+
 /* ---- Full model ----------------------------------------------------- */
 typedef struct {
-    Config  cfg;
-    PGF     pgf;
-    Encoder enc;
-    Decoder dec;
-    Mat     xtilde, henc, dhenc, dxtilde, pred;
+    Config    cfg;
+    PGF       pgf;
+    Encoder   enc;
+    Decoder   dec;
+    CoSpatial co;
+    int       use_co;
+    Mat       nbr;  int nbr_cnt;       /* current sample's neighbours    */
+    Mat       xtilde, henc, henc2, dhenc, dhenc2, dxtilde, pred;
 } Model;
 Model model_new(const Config *c, ParamList *pl);
+void  model_set_neighbors(Model *m, const Mat nbr, int cnt);   /* set before model_forward */
 void  model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev); /* -> m->pred */
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);
 void  model_free(Model *m);

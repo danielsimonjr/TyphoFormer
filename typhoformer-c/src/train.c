@@ -44,10 +44,12 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
     int H = d->pred_len < MAXH ? d->pred_len : MAXH;
     Mat xn = mat_new(d->in_len, d->d_num), xt = mat_new(d->in_len, d->d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(d->pred_len, 2);
+    Mat nbr = mat_new(TF_NBR_K, TF_NBR_NF);
     Eval e; memset(&e, 0, sizeof e); e.H = H;
     for (int i = 0; i < n; ++i) {
         int s = idx ? idx[i] : i;
         dataset_get(d, s, xn, xt, yp, Y);
+        int nc; dataset_neighbors(d, s, nbr, &nc); model_set_neighbors(m, nbr, nc);
         model_forward(m, xn, xt, yp);
         float seed[2] = { yp.data[0], yp.data[1] };
         dataset_denorm(d, seed);                        /* coords back to degrees for metrics */
@@ -65,7 +67,7 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
         e.mmae += e.mae[h]; e.mkm += e.km[h]; e.mbase += e.base_km[h];
     }
     e.mmae /= H; e.mkm /= H; e.mbase /= H;
-    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y);
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&nbr);
     return e;
 }
 
@@ -99,7 +101,7 @@ static int cmd_train(int argc, char **argv) {
     int motion = 0;                   /* add position+velocity input features */
     int delta = 0;                    /* decoder predicts displacement     */
     int km_loss = 0;                  /* weight longitude error by cos^2(lat) */
-    int no_spatial = 0, posenc = 0, pool_last = 0, prenorm = 0;  /* encoder options */
+    int no_spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
     unsigned long seed = 20260711, split_seed = 42;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     for (int i = 1; i < argc; ++i) {
@@ -132,6 +134,8 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--posenc"))         posenc = 1;
         else if (!strcmp(argv[i], "--pool=last"))      pool_last = 1;
         else if (!strcmp(argv[i], "--prenorm"))        prenorm = 1;
+        else if (!strcmp(argv[i], "--timebias"))       timebias = 1;
+        else if (!strcmp(argv[i], "--co_spatial"))     co_spatial = 1;
         else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
@@ -152,6 +156,7 @@ static int cmd_train(int argc, char **argv) {
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin) { c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text; }
     if (motion) dataset_add_motion(&ds);             /* +lat,lon,dlat,dlon (before standardize) */
+    if (co_spatial) dataset_build_neighbors(&ds);    /* co-active storm neighbours */
     c.d_num = ds.d_num;
     /* Leakage-safe: split whole STORMS into train/val/test, then fit feature +
      * coordinate normalization on the TRAIN storms only. (The .tfb path has no
@@ -171,7 +176,8 @@ static int cmd_train(int argc, char **argv) {
     /* architecture options — all set BEFORE model_new (they change the param set) */
     if (delta) model_set_delta(1);
     model_set_no_spatial(no_spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
-    nn_set_prenorm(prenorm);
+    nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
+    if (co_spatial && threads > 1) printf("note: --co_spatial applies on the serial path; use --threads=1\n");
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     Adam opt = adam_new(&pl, lr, wd);
@@ -191,6 +197,7 @@ static int cmd_train(int argc, char **argv) {
     Mat xn = mat_new(c.in_len, c.d_num), xt = mat_new(c.in_len, c.d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(c.pred_len, 2);
     Mat dpred = mat_new(c.pred_len, c.out_dim), dgate = mat_new(c.in_len, c.d_model);
+    Mat nbr = mat_new(TF_NBR_K, TF_NBR_NF);
 
     Eval e0 = evaluate(&m, &ds, val, nva);
     printf("epoch  0 (init)          | val MAE %.4f | val dR %.2f km  (persistence %.2f km)\n",
@@ -212,6 +219,7 @@ static int cmd_train(int argc, char **argv) {
                 double bl = 0.0;
                 for (int k = 0; k < bs; ++k) {
                     dataset_get(&ds, train[b + k], xn, xt, yp, Y);
+                    if (co_spatial) { int nc; dataset_neighbors(&ds, train[b + k], nbr, &nc); model_set_neighbors(&m, nbr, nc); }
                     model_forward(&m, xn, xt, yp);
                     bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
                     if (km_loss) {                       /* equirectangular: down-weight lon by cos^2(lat) */
@@ -259,7 +267,7 @@ static int cmd_train(int argc, char **argv) {
         print_horizons(&te);
     }
 
-    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate); mat_free(&nbr);
     if (pt) partrainer_free(pt);
     split_free(&sp); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
     return 0;
@@ -279,7 +287,7 @@ static void apply_ckpt_stats(Dataset *ds, const char *weights) {
 /* ---- eval ----------------------------------------------------------- */
 static int cmd_eval(int argc, char **argv) {
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *weights = DEF_CKPT;
-    int no_text = 0;
+    int no_text = 0, co_spatial = 0;
     for (int i = 1; i < argc; ++i) {
         if      (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;
         else if (!strncmp(argv[i], "--csv=", 6))      csv = argv[i] + 6;
@@ -291,6 +299,8 @@ static int cmd_eval(int argc, char **argv) {
         else if (!strcmp(argv[i], "--posenc"))        model_set_posenc(1);
         else if (!strcmp(argv[i], "--pool=last"))     model_set_pool_last(1);
         else if (!strcmp(argv[i], "--prenorm"))       nn_set_prenorm(1);
+        else if (!strcmp(argv[i], "--timebias"))      nn_set_timebias(1);
+        else if (!strcmp(argv[i], "--co_spatial"))  { model_set_co_spatial(1); co_spatial = 1; }
     }
     Config c = checkpoint_load_config(weights);
     printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d\n",
@@ -300,6 +310,7 @@ static int cmd_eval(int argc, char **argv) {
 
     ds.no_text = no_text;
     if (!ds.prewindowed && c.d_num == ds.d_num + 4) dataset_add_motion(&ds);  /* ckpt trained --motion */
+    if (co_spatial) dataset_build_neighbors(&ds);
     apply_ckpt_stats(&ds, weights);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);

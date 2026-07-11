@@ -4,6 +4,7 @@
  * configuration, for both single-step and multi-step (autoregressive) decoding.
  */
 #include "model.h"
+#include "data.h"   /* TF_NBR_K / TF_NBR_NF for the co_spatial variant */
 
 #include <math.h>
 #include <stdio.h>
@@ -30,6 +31,15 @@ static int check_model(const char *label, int pred_len) {
 
     plist_init(&pl);
     M = model_new(&c, &pl);
+
+    /* co-active spatial attention needs a (fixed) neighbour block fed in before
+     * every forward — synthesise a couple of neighbours so the module is on the
+     * active path during the gradient check. */
+    Mat nbr = mat_new(TF_NBR_K, TF_NBR_NF);
+    if (M.use_co) {
+        for (int i = 0; i < TF_NBR_K * TF_NBR_NF; ++i) nbr.data[i] = nn_uniform(-1, 1);
+        model_set_neighbors(&M, nbr, 2);
+    }
 
     xnum  = mat_new(c.in_len, c.d_num);
     xtext = mat_new(c.in_len, c.d_text);
@@ -72,7 +82,7 @@ static int check_model(const char *label, int pred_len) {
 
     model_free(&M); plist_free(&pl);
     mat_free(&xnum); mat_free(&xtext); mat_free(&yprev); mat_free(&Y);
-    mat_free(&dpred); mat_free(&dgate);
+    mat_free(&dpred); mat_free(&dgate); mat_free(&nbr);
     return fail;
 }
 
@@ -90,6 +100,9 @@ int main(void) {
     model_set_posenc(1);     fail |= check_model("posenc", 1);     model_set_posenc(0);
     model_set_pool_last(1);  fail |= check_model("pool_last", 1);  model_set_pool_last(0);
     nn_set_prenorm(1);       fail |= check_model("prenorm", 1);    nn_set_prenorm(0);
+    nn_set_timebias(1);      fail |= check_model("timebias", 1);   nn_set_timebias(0);
+    model_set_co_spatial(1); fail |= check_model("co_spatial", 1); model_set_co_spatial(0);
+    model_set_co_spatial(1); fail |= check_model("co_spatial+multistep", 3); model_set_co_spatial(0);
     /* everything on at once (multi-step) */
     model_set_delta(1); model_set_no_spatial(1); model_set_posenc(1);
     model_set_pool_last(1); nn_set_prenorm(1);

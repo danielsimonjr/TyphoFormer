@@ -6,6 +6,12 @@ OPT     ?= -O3
 CFLAGS  := -std=c11 $(OPT) -Wall -Wextra -Wpedantic -Iinclude -pthread
 LDLIBS  := -lm -pthread
 
+# Auto-generated header dependencies (-MMD writes a .d beside each .o; -MP adds
+# phony targets so a deleted header doesn't break the build). This makes editing
+# a header — e.g. changing a struct's layout — recompile every dependent .o,
+# instead of silently linking objects built against the old definition.
+CFLAGS  += -MMD -MP
+
 # Opt-in native SIMD (non-portable binary; source stays pure C):  make NATIVE=1
 ifeq ($(NATIVE),1)
 CFLAGS  += -march=native -funroll-loops
@@ -83,5 +89,9 @@ backends/opencl/%.o: backends/opencl/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f src/*.o backends/opencl/*.o backends/opencl/test_opencl \
+	rm -f src/*.o src/*.d backends/opencl/*.o backends/opencl/*.d \
+	      backends/opencl/test_opencl tests/*.d \
 	      $(TESTS) typhoformer libtyphoformer.a *.ckpt *.tfb
+
+# Pull in the auto-generated header dependencies (no-op on the first build).
+-include $(OBJ:.o=.d) $(TESTS:=.d) $(TENSOR_OBJ:.o=.d)

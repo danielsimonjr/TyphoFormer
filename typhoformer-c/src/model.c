@@ -3,6 +3,7 @@
  * and the full TyphoFormer model with its loss.
  */
 #include "model.h"
+#include "data.h"   /* TF_NBR_K / TF_NBR_NF for co-active spatial attention */
 
 #include <assert.h>
 #include <math.h>
@@ -17,10 +18,11 @@ void model_set_delta(int on) { g_delta = on; }
 int  model_delta(void) { return g_delta; }
 
 /* Encoder architecture options (read at encoder_new time). Off by default. */
-static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0;
+static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0, g_co_spatial = 0;
 void model_set_no_spatial(int on) { g_no_spatial = on; }
 void model_set_posenc(int on)     { g_posenc = on; }
 void model_set_pool_last(int on)  { g_pool_last = on; }
+void model_set_co_spatial(int on) { g_co_spatial = on; }
 
 Config config_default(void) {
     Config c;
@@ -260,33 +262,97 @@ void decoder_free(Decoder *d) {
 }
 
 /* =====================================================================
+ * Co-active spatial cross-attention (reuses MHA over [1+cnt, D])
+ * ===================================================================== */
+static CoSpatial cospatial_new(int nf, int d, ParamList *pl) {
+    CoSpatial cs; cs.nf = nf; cs.d = d; cs.cnt = 0;
+    cs.proj = linear_new(nf, d, pl, "co.proj");
+    cs.attn = mha_new(d, 1, 0, pl, "co.attn");        /* single-head self-attn */
+    cs.tok = NULLMAT; cs.seq = NULLMAT; cs.out = NULLMAT; cs.dmha = NULLMAT; cs.dseq = NULLMAT;
+    return cs;
+}
+static void ensure_m(Mat *m, int r, int c) {
+    if (m->data == NULL || m->rows != r || m->cols != c) { if (m->data) mat_free(m); *m = mat_new(r, c); }
+}
+/* out[1,D] = henc + attention(context over [context; neighbour tokens]) */
+static void cospatial_forward(CoSpatial *cs, const Mat henc, const Mat nbr, int cnt, Mat out) {
+    const int D = cs->d;
+    int c = cnt < 0 ? 0 : (cnt > nbr.rows ? nbr.rows : cnt);
+    cs->cnt = c;
+    if (c == 0) { mat_copy(out, henc); return; }       /* no neighbours -> identity */
+    Mat nbr_c = { c, cs->nf, nbr.data };               /* first c neighbour rows */
+    ensure_m(&cs->tok, c, D);
+    linear_forward(&cs->proj, nbr_c, cs->tok);         /* project neighbours to D */
+    ensure_m(&cs->seq, 1 + c, D); ensure_m(&cs->out, 1 + c, D);
+    memcpy(&cs->seq.data[0], henc.data, (size_t)D * sizeof(float));
+    memcpy(&cs->seq.data[D], cs->tok.data, (size_t)c * D * sizeof(float));
+    mha_forward(&cs->attn, cs->seq, cs->out);          /* context (row 0) attends over all */
+    for (int i = 0; i < D; ++i) out.data[i] = henc.data[i] + cs->out.data[i];   /* residual */
+}
+static void cospatial_backward(CoSpatial *cs, const Mat dout, Mat dhenc) {
+    const int D = cs->d; int c = cs->cnt;
+    if (c == 0) { mat_copy(dhenc, dout); return; }
+    ensure_m(&cs->dmha, 1 + c, D); ensure_m(&cs->dseq, 1 + c, D);
+    mat_zero(cs->dmha);
+    memcpy(&cs->dmha.data[0], dout.data, (size_t)D * sizeof(float));   /* only row 0 has grad */
+    mha_backward(&cs->attn, cs->dmha, cs->dseq);
+    for (int i = 0; i < D; ++i) dhenc.data[i] = dout.data[i] + cs->dseq.data[i]; /* residual + query path */
+    Mat dtok = { c, D, &cs->dseq.data[D] };            /* grad into neighbour tokens */
+    /* proj.xcache still holds the neighbour input from cospatial_forward */
+    linear_backward(&cs->proj, dtok, (Mat){0,0,NULL});    /* accumulate proj grads; drop input grad */
+}
+static void cospatial_free(CoSpatial *cs) {
+    linear_free(&cs->proj); mha_free(&cs->attn);
+    mat_free(&cs->tok); mat_free(&cs->seq); mat_free(&cs->out);
+    mat_free(&cs->dmha); mat_free(&cs->dseq);
+}
+
+/* =====================================================================
  * Full model
  * ===================================================================== */
 Model model_new(const Config *c, ParamList *pl) {
     Model m; m.cfg = *c;
     m.pgf = pgf_new(c, pl);
     m.enc = encoder_new(c, pl);
+    m.use_co = g_co_spatial;
+    if (m.use_co) m.co = cospatial_new(TF_NBR_NF, c->d_model, pl);
     m.dec = decoder_new(c, pl);
+    m.nbr = mat_new(TF_NBR_K, TF_NBR_NF); m.nbr_cnt = 0;
     m.xtilde  = mat_new(c->in_len, c->d_model);
     m.henc    = mat_new(1, c->d_model);
+    m.henc2   = mat_new(1, c->d_model);
     m.dhenc   = mat_new(1, c->d_model);
+    m.dhenc2  = mat_new(1, c->d_model);
     m.dxtilde = mat_new(c->in_len, c->d_model);
     m.pred    = mat_new(c->pred_len, c->out_dim);
     return m;
 }
+void model_set_neighbors(Model *m, const Mat nbr, int cnt) {
+    mat_copy(m->nbr, nbr); m->nbr_cnt = cnt;
+}
 void model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev) {
     pgf_forward(&m->pgf, xnum, xtext, m->xtilde);
     encoder_forward(&m->enc, m->xtilde, m->henc);
-    decoder_forward(&m->dec, m->henc, yprev, m->cfg.pred_len, m->pred);
+    Mat ctx = m->henc;
+    if (m->use_co) { cospatial_forward(&m->co, m->henc, m->nbr, m->nbr_cnt, m->henc2); ctx = m->henc2; }
+    decoder_forward(&m->dec, ctx, yprev, m->cfg.pred_len, m->pred);
 }
 void model_backward(Model *m, const Mat dpred, const Mat dgate_pen) {
-    decoder_backward(&m->dec, dpred, m->dhenc);
+    if (m->use_co) {
+        decoder_backward(&m->dec, dpred, m->dhenc2);
+        cospatial_backward(&m->co, m->dhenc2, m->dhenc);
+    } else {
+        decoder_backward(&m->dec, dpred, m->dhenc);
+    }
     encoder_backward(&m->enc, m->dhenc, m->dxtilde);
     pgf_backward(&m->pgf, m->dxtilde, dgate_pen);
 }
 void model_free(Model *m) {
     pgf_free(&m->pgf); encoder_free(&m->enc); decoder_free(&m->dec);
-    mat_free(&m->xtilde); mat_free(&m->henc); mat_free(&m->dhenc);
+    if (m->use_co) cospatial_free(&m->co);
+    mat_free(&m->nbr);
+    mat_free(&m->xtilde); mat_free(&m->henc); mat_free(&m->henc2);
+    mat_free(&m->dhenc); mat_free(&m->dhenc2);
     mat_free(&m->dxtilde); mat_free(&m->pred);
 }
 
