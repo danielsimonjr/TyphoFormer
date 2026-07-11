@@ -136,7 +136,52 @@ is dominated by the data (98 storms) and the intrinsic hardness of the horizon,
 not by how the 12-step context is mixed. `--no_spatial` is worth keeping anyway
 — it drops parameters whose Q/K never train, at no accuracy cost.
 
-## 8. What this means
+## 8. Giving attention a sense of time and space — also neutral
+
+Two targeted attention upgrades, each on the fixed `--motion --delta` model,
+three storm-split seeds (held-out test ΔR, km):
+
+**`--timebias`** — an ALiBi-style relative-distance bias in the *temporal*
+attention (`score[i,j] −= slopeₕ·|i−j|`), giving self-attention an intrinsic
+sense of recency without any new parameters.
+
+**`--co_spatial`** — *real* multi-node spatial attention. The paper's "spatial"
+blocks are degenerate (N=1: every position attends only to itself). Here the
+encoded context instead attends over the relative states — (Δlat, Δlon,
+Δmax_wind) — of every storm active at the same timestep (38% of timesteps have
+≥2 co-active storms). This is genuine cross-storm attention, reusing MHA over a
+`[context; neighbour…]` token sequence.
+
+| variant | seed 1 | seed 3 | seed 5 | mean |
+|:--|:--:|:--:|:--:|:--:|
+| base (`--motion --delta`) | 47.2 | 51.9 | 50.6 | 49.9 |
+| `--timebias` | 46.2 | 52.5 | 51.6 | 50.1 |
+| `--co_spatial` (random-init residual) | **93.6** | 54.2 | 48.9 | 65.6 ⚠ |
+| `--co_spatial` (zero-init residual) | 50.0 | 49.7 | 53.5 | 51.1 |
+| `--timebias --co_spatial` (zero-init) | 51.2 | 52.5 | 48.9 | 50.9 |
+
+Two things worth recording honestly:
+
+1. **A real bug we measured, then fixed.** The first `--co_spatial` build put a
+   *randomly-initialised* attention residual into the decoder's context. On seed
+   1 that kicked training off course and ΔR blew up to 93.6 km — nearly 2× the
+   base, and close to persistence. Zero-initialising the attention's output
+   projection (so the module starts as an exact no-op and learns the correction
+   from zero — the delta-head trick) removed the divergence: the seed-1 result
+   dropped from 93.6 → 50.0 and the spread collapsed back into the noise band.
+2. **Once stable, it does not help.** Zero-init `--co_spatial` means 51.1, and
+   `--timebias` 50.1 — both inside the ±3 km split noise of the 49.9 base, i.e.
+   neither is a real improvement. Giving the temporal attention a sense of time,
+   and making the spatial attention genuinely multi-node, are both *architecturally*
+   the right thing to do — but on this data they change nothing measurable.
+
+This is the same lesson as §7 from a different angle: the ceiling here is the
+data and the horizon, not how cleverly 12 steps of context (or a handful of
+co-active storms) are attended over. The value of building `--co_spatial`
+properly was the measurement — and catching a real training divergence that a
+single-split run would have hidden.
+
+## 9. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
@@ -153,6 +198,14 @@ not by how the 12-step context is mixed. `--no_spatial` is worth keeping anyway
   already balances the axes well enough. The more promising levers are longer
   horizons (where curvature should let a learned model finally pass
   constant-velocity) and — the ceiling on everything — **more than 98 storms**.
+- **The architecture is not the lever** (§7, §8). An encoder sweep (no_spatial /
+  posenc / pool=last / prenorm) and two attention upgrades — a temporal
+  distance bias (`--timebias`) and *real* multi-node spatial attention over
+  co-active storms (`--co_spatial`) — are all neutral within split noise on the
+  fixed model. Each is the architecturally right thing to do; none moves ΔR on
+  this data. Building `--co_spatial` properly still paid off: it surfaced (and
+  we fixed, via a zero-init residual) a real training divergence that a
+  single-split run would have hidden.
 
 ## Reproduce
 
@@ -164,6 +217,10 @@ for s in 1 2 3 4 5; do ./typhoformer train 30 --patience=8 --motion --delta --sp
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42 --no_text  # numbers only
 # the honest baseline the model must beat
 ./typhoformer baseline --pred_len=4
+# architecture explorations (all neutral, §7–§8) — vary --split_seed to see the noise
+./typhoformer train 30 --patience=8 --motion --delta --no_spatial          # encoder sweep
+./typhoformer train 30 --patience=8 --motion --delta --timebias            # temporal distance bias
+./typhoformer train 30 --patience=8 --motion --delta --co_spatial --threads=1  # real spatial attn
 ```
 
 (See [LABS.md](LABS.md) Track D for these as guided exercises.)

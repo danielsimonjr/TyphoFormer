@@ -1,6 +1,9 @@
 # build artifacts
 *.o
 src/*.o
+*.d
+src/*.d
+tests/*.d
 tests/test_tensor
 tests/test_nn
 tests/test_model

@@ -268,6 +268,13 @@ static CoSpatial cospatial_new(int nf, int d, ParamList *pl) {
     CoSpatial cs; cs.nf = nf; cs.d = d; cs.cnt = 0;
     cs.proj = linear_new(nf, d, pl, "co.proj");
     cs.attn = mha_new(d, 1, 0, pl, "co.attn");        /* single-head self-attn */
+    /* Zero the attention's OUTPUT projection so the module starts as a no-op:
+     * out = henc + o(...) = henc at init. Same idea as the delta head's zero-init
+     * fc2 — a randomly-initialised residual into the decoder's context otherwise
+     * kicks training off course on some splits (a real divergence we measured).
+     * Gradients still flow, so the spatial signal is learned from zero. */
+    for (int i = 0; i < cs.attn.o.out * cs.attn.o.in; ++i) cs.attn.o.W.data[i] = 0.0f;
+    for (int i = 0; i < cs.attn.o.out; ++i) cs.attn.o.b[i] = 0.0f;
     cs.tok = NULLMAT; cs.seq = NULLMAT; cs.out = NULLMAT; cs.dmha = NULLMAT; cs.dseq = NULLMAT;
     return cs;
 }
