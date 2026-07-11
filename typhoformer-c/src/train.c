@@ -99,6 +99,7 @@ static int cmd_train(int argc, char **argv) {
     int motion = 0;                   /* add position+velocity input features */
     int delta = 0;                    /* decoder predicts displacement     */
     int km_loss = 0;                  /* weight longitude error by cos^2(lat) */
+    int no_spatial = 0, posenc = 0, pool_last = 0, prenorm = 0;  /* encoder options */
     unsigned long seed = 20260711, split_seed = 42;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     for (int i = 1; i < argc; ++i) {
@@ -127,6 +128,10 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--motion"))         motion = 1;
         else if (!strcmp(argv[i], "--delta"))          delta = 1;
         else if (!strcmp(argv[i], "--km_loss"))        km_loss = 1;
+        else if (!strcmp(argv[i], "--no_spatial"))     no_spatial = 1;
+        else if (!strcmp(argv[i], "--posenc"))         posenc = 1;
+        else if (!strcmp(argv[i], "--pool=last"))      pool_last = 1;
+        else if (!strcmp(argv[i], "--prenorm"))        prenorm = 1;
         else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
@@ -163,7 +168,10 @@ static int cmd_train(int argc, char **argv) {
     if (km_loss && threads > 1) printf("note: --km_loss applies on the serial path; use --threads=1\n");
 
     if (threads < 1) threads = 1;
-    if (delta) model_set_delta(1);                   /* before model_new (zero-inits fc2) */
+    /* architecture options — all set BEFORE model_new (they change the param set) */
+    if (delta) model_set_delta(1);
+    model_set_no_spatial(no_spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
+    nn_set_prenorm(prenorm);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     Adam opt = adam_new(&pl, lr, wd);
@@ -279,6 +287,10 @@ static int cmd_eval(int argc, char **argv) {
         else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
         else if (!strcmp(argv[i], "--no_text"))       no_text = 1;
         else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
+        else if (!strcmp(argv[i], "--no_spatial"))    model_set_no_spatial(1);
+        else if (!strcmp(argv[i], "--posenc"))        model_set_posenc(1);
+        else if (!strcmp(argv[i], "--pool=last"))     model_set_pool_last(1);
+        else if (!strcmp(argv[i], "--prenorm"))       nn_set_prenorm(1);
     }
     Config c = checkpoint_load_config(weights);
     printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d\n",

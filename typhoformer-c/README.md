@@ -99,6 +99,10 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
+| `--no_spatial` | Drop the degenerate N=1 spatial encoder blocks (their Q/K never train). | off |
+| `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
+| `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |
+| `--prenorm` | Pre-norm transformer blocks (LN before each sublayer) instead of post-norm. | off |
 | `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
 | `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |

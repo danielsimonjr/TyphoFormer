@@ -20,15 +20,16 @@ static double loss_only(void) {
     return model_loss(M.pred, Y, M.pgf.gate, LAMBDA, none, none);
 }
 
-static int check_model(int pred_len, int delta) {
-    printf("[model gradient check, pred_len=%d, delta=%d]\n", pred_len, delta);
+/* check_model reads whatever architecture flags are currently set globally
+ * (delta / no_spatial / posenc / pool_last / prenorm); main sets and resets
+ * them around each call. */
+static int check_model(const char *label, int pred_len) {
+    printf("[model gradient check, %s, pred_len=%d]\n", label, pred_len);
     Config c; c.d_num = 3; c.d_text = 5; c.d_model = 8; c.out_dim = 2;
     c.in_len = 4; c.pred_len = pred_len; c.d_ff = 16; c.n_heads = 2; c.n_layers = 1;
 
     plist_init(&pl);
-    model_set_delta(delta);
     M = model_new(&c, &pl);
-    model_set_delta(0);
 
     xnum  = mat_new(c.in_len, c.d_num);
     xtext = mat_new(c.in_len, c.d_text);
@@ -78,10 +79,23 @@ static int check_model(int pred_len, int delta) {
 int main(void) {
     nn_seed(7);
     int fail = 0;
-    fail |= check_model(1, 0);   /* single-step, absolute */
-    fail |= check_model(3, 0);   /* multi-step autoregressive rollout */
-    fail |= check_model(1, 1);   /* single-step, delta decoder */
-    fail |= check_model(3, 1);   /* multi-step, delta decoder */
+    fail |= check_model("baseline", 1);
+    fail |= check_model("multistep", 3);
+    model_set_delta(1);
+    fail |= check_model("delta", 1);
+    fail |= check_model("delta+multistep", 3);
+    model_set_delta(0);
+    /* encoder architecture variants (each set, checked, reset) */
+    model_set_no_spatial(1); fail |= check_model("no_spatial", 1); model_set_no_spatial(0);
+    model_set_posenc(1);     fail |= check_model("posenc", 1);     model_set_posenc(0);
+    model_set_pool_last(1);  fail |= check_model("pool_last", 1);  model_set_pool_last(0);
+    nn_set_prenorm(1);       fail |= check_model("prenorm", 1);    nn_set_prenorm(0);
+    /* everything on at once (multi-step) */
+    model_set_delta(1); model_set_no_spatial(1); model_set_posenc(1);
+    model_set_pool_last(1); nn_set_prenorm(1);
+    fail |= check_model("all-options", 3);
+    model_set_delta(0); model_set_no_spatial(0); model_set_posenc(0);
+    model_set_pool_last(0); nn_set_prenorm(0);
     if (!fail) printf("\nmodel gradient check passed\n");
     return fail;
 }

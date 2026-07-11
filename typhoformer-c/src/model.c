@@ -16,6 +16,12 @@ static int g_delta = 0;
 void model_set_delta(int on) { g_delta = on; }
 int  model_delta(void) { return g_delta; }
 
+/* Encoder architecture options (read at encoder_new time). Off by default. */
+static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0;
+void model_set_no_spatial(int on) { g_no_spatial = on; }
+void model_set_posenc(int on)     { g_posenc = on; }
+void model_set_pool_last(int on)  { g_pool_last = on; }
+
 Config config_default(void) {
     Config c;
     c.d_num = 14; c.d_text = 384; c.d_model = 256; c.out_dim = 2;
@@ -121,13 +127,22 @@ void timemix_free(TimeMix *t) {
  * ===================================================================== */
 Encoder encoder_new(const Config *c, ParamList *pl) {
     Encoder e; e.cfg = *c;
+    e.use_spatial = !g_no_spatial; e.use_posenc = g_posenc; e.pool_last = g_pool_last;
     e.input_proj  = linear_new(c->d_model, c->d_model, pl, "enc.input_proj");
+    /* learned positional encoding, registered right after input_proj */
+    e.posenc = NULLMAT; e.dposenc = NULLMAT;
+    if (e.use_posenc) {
+        e.posenc = mat_new(c->in_len, c->d_model); e.dposenc = mat_new(c->in_len, c->d_model);
+        float k = 0.02f;                              /* small init, like a PE table */
+        for (int i = 0; i < c->in_len * c->d_model; ++i) e.posenc.data[i] = nn_uniform(-k, k);
+        plist_add(pl, e.posenc.data, e.dposenc.data, c->in_len * c->d_model, "enc.posenc");
+    }
     e.output_proj = linear_new(c->d_model, c->d_model, pl, "enc.output_proj");
     e.temporal = (Block *)malloc(c->n_layers * sizeof(Block));
-    e.spatial  = (Block *)malloc(c->n_layers * sizeof(Block));
+    e.spatial  = e.use_spatial ? (Block *)malloc(c->n_layers * sizeof(Block)) : NULL;
     for (int l = 0; l < c->n_layers; ++l) {
         e.temporal[l] = block_new(c->d_model, c->n_heads, c->d_ff, 0, pl, "enc.temporal");
-        e.spatial[l]  = block_new(c->d_model, c->n_heads, c->d_ff, 1, pl, "enc.spatial");
+        if (e.use_spatial) e.spatial[l] = block_new(c->d_model, c->n_heads, c->d_ff, 1, pl, "enc.spatial");
     }
     e.tmix = timemix_new(c->in_len, 1, pl);
     e.b0  = mat_new(c->in_len, c->d_model); e.b1  = mat_new(c->in_len, c->d_model);
@@ -136,32 +151,40 @@ Encoder encoder_new(const Config *c, ParamList *pl) {
     return e;
 }
 void encoder_forward(Encoder *e, const Mat xtilde, Mat henc) {
-    const int L = e->cfg.n_layers;
+    const int L = e->cfg.n_layers, T = e->cfg.in_len, D = e->cfg.d_model;
     Mat cur = e->b0, nxt = e->b1, tmp;
     linear_forward(&e->input_proj, xtilde, cur);
-    /* paper-faithful: alternate temporal then spatial WITHIN each layer */
+    if (e->use_posenc) for (int i = 0; i < T * D; ++i) cur.data[i] += e->posenc.data[i];
+    /* alternate temporal then (optionally) spatial WITHIN each layer */
     for (int l = 0; l < L; ++l) {
         block_forward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
-        block_forward(&e->spatial[l],  cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
+        if (e->use_spatial) { block_forward(&e->spatial[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
     }
-    timemix_forward(&e->tmix, cur, e->tmid);          /* [1,D] */
+    if (e->pool_last) memcpy(e->tmid.data, &cur.data[(T - 1) * D], D * sizeof(float)); /* last step */
+    else              timemix_forward(&e->tmix, cur, e->tmid);                          /* [1,D] */
     linear_forward(&e->output_proj, e->tmid, henc);   /* [1,D] */
 }
 void encoder_backward(Encoder *e, const Mat dhenc, Mat dxtilde) {
-    const int L = e->cfg.n_layers;
+    const int L = e->cfg.n_layers, T = e->cfg.in_len, D = e->cfg.d_model;
     linear_backward(&e->output_proj, dhenc, e->dtmid);
     Mat cur = e->db0, nxt = e->db1, tmp;
-    timemix_backward(&e->tmix, e->dtmid, cur);
+    if (e->pool_last) { mat_zero(cur); memcpy(&cur.data[(T - 1) * D], e->dtmid.data, D * sizeof(float)); }
+    else              timemix_backward(&e->tmix, e->dtmid, cur);
     for (int l = L - 1; l >= 0; --l) {
-        block_backward(&e->spatial[l],  cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
+        if (e->use_spatial) { block_backward(&e->spatial[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
         block_backward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
     }
+    if (e->use_posenc) for (int i = 0; i < T * D; ++i) e->dposenc.data[i] += cur.data[i]; /* += identity path */
     linear_backward(&e->input_proj, cur, dxtilde);
 }
 void encoder_free(Encoder *e) {
     linear_free(&e->input_proj); linear_free(&e->output_proj);
-    for (int l = 0; l < e->cfg.n_layers; ++l) { block_free(&e->temporal[l]); block_free(&e->spatial[l]); }
+    for (int l = 0; l < e->cfg.n_layers; ++l) {
+        block_free(&e->temporal[l]);
+        if (e->use_spatial) block_free(&e->spatial[l]);
+    }
     free(e->temporal); free(e->spatial); timemix_free(&e->tmix);
+    mat_free(&e->posenc); mat_free(&e->dposenc);
     mat_free(&e->b0); mat_free(&e->b1); mat_free(&e->db0); mat_free(&e->db1);
     mat_free(&e->tmid); mat_free(&e->dtmid);
 }

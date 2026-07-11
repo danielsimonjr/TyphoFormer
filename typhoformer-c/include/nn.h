@@ -24,6 +24,10 @@ void nn_dropout_seed(unsigned long s);
 unsigned long nn_dropout_state(void);   /* current thread's dropout RNG (to thread it across workers) */
 int  nn_training(void);
 
+/* Pre-norm transformer blocks (LN before each sublayer) instead of the default
+ * post-norm. Off by default. Read at block_forward/backward time. */
+void nn_set_prenorm(int on);
+
 /* ---- parameter registry --------------------------------------------- */
 typedef struct { float *v; float *g; int n; const char *name; } Param;
 typedef struct { Param *item; int count, cap; } ParamList;
