@@ -161,6 +161,7 @@ typedef struct { int d_num, d_text, d_model, out_dim,
                      in_len, pred_len, d_ff, n_heads, n_layers; } Config;
 Config config_default(void);   // the paper config (d_model=256, d_ff=1024, 3 layers, 4 heads)
 
+void  model_set_delta(int on);   // decoder predicts displacement; call BEFORE model_new
 Model model_new(const Config *c, ParamList *pl);
 void  model_forward (Model *m, const Mat xnum, const Mat xtext, const Mat yprev); // fills m->pred, m->pgf.gate
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);
@@ -188,15 +189,20 @@ typedef struct { int n_records, d_num, d_text, in_len, pred_len;
 
 Dataset dataset_load    (const char *csv, const char *embdir, int in_len, int pred_len);
 Dataset dataset_load_bin(const char *path);                 // pre-windowed .tfb
+void    dataset_add_motion(Dataset *d);                     // +lat,lon,Δlat,Δlon (d_num 14→18)
+Split   dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed);
+void    dataset_standardize(Dataset *d);                    // train-only fit + apply
 void    dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y);
-void    dataset_split(const Dataset *d, float val_frac, unsigned long seed,
-                      int **train, int *n_train, int **val, int *n_val);
+void    dataset_denorm(const Dataset *d, float *latlon);    // normalized coord → degrees
 void    dataset_free(Dataset *d);
 float  *npy_load_2d(const char *path, int *rows, int *cols);  // malloc'd; caller frees
 ```
-`dataset_get` fills caller-allocated `Mat`s (`xnum[T,14]`, `xtext[T,384]`,
-`yprev[1,2]`, `Y[pred_len,2]`). The index arrays from `dataset_split` are
-`malloc`'d — the caller frees them.
+`dataset_get` fills caller-allocated `Mat`s (`xnum[T, d_num]`, `xtext[T,384]`,
+`yprev[1,2]`, `Y[pred_len,2]`). `d_num` is 14 by default, or **18 after
+`dataset_add_motion`** — always size `xnum` from `d->d_num`, not a literal 14.
+Coordinates come back normalized; `dataset_denorm` converts to degrees. The
+leakage-safe pipeline is `dataset_load` → `dataset_add_motion` (optional) →
+`dataset_split3` → `dataset_standardize`.
 
 ---
 

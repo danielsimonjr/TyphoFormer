@@ -105,7 +105,8 @@ metric `|g_num − g_ana| / (|g_num| + |g_ana| + 1e-2)` and an absolute floor of
 | **Pre-norm blocks** | reorder `block_forward` to `y = x + MHA(LN1(x))` etc.; mirror the residual/LN order in `block_backward`. |
 | **Dropout** | *Implemented* — see `dropout_apply` in `src/nn.c` and the block's `drop1`/`drop2` masks. A cached 0/(1/(1-p)) mask in forward, multiplied into the gradient in backward, gated by `nn_set_training`. Model your own stochastic layer on it. |
 | **Learned positional encoding** | add a `[T,D]` parameter to the encoder, `+=` it after `input_proj`, register it, and add its (identity) gradient in backward. |
-| **New numerical features** | change `NUMCOL`/`d_num` in `data.c` and `Config.d_num`; retrain (the checkpoint config guards against loading a mismatched model). |
+| **New numerical features** | change `NUMCOL`/`d_num` in `data.c` and `Config.d_num`; retrain (the checkpoint config guards against loading a mismatched model). `dataset_add_motion()` (the `--motion` flag) is the worked reference — it appends `lat, lon, Δlat, Δlon` and bumps `d_num` 14→18, and it is the change that most improves forecast skill (see [FINDINGS.md](FINDINGS.md)). |
+| **Delta / residual decoder** | *Implemented* (`--delta`, `model_set_delta`): the decoder predicts displacement from the seed with `fc2` zero-init. A one-line forward change (accumulate) and one-line backward change (identity term). Copy it for any "predict a correction over a baseline" head. |
 | **Bigger/smaller model** | just change `Config` fields — the whole graph is config-driven. |
 
 ---
@@ -171,8 +172,13 @@ Ordered roughly easy → hard. (Items marked ✓ are already implemented — stu
 reference, then extend or vary it.)
 
 1. Swap ReLU→GELU (§2) and compare validation ΔR.
-2. Add dropout and measure its effect on overfitting.
+2. Add dropout and measure its effect on overfitting. (Dropout itself is done;
+   sweep the rate.)
 3. Implement pre-norm blocks and compare training stability.
+   ✓ *Done — and it matters most:* `--motion` (position+velocity inputs) and
+   `--delta` (displacement decoder) took held-out ΔR 128→48 km. Try extending
+   motion with acceleration (Δ²), or predicting the residual over the
+   constant-velocity extrapolation instead of over the seed.
 4. ✓ *Done:* normalization stats in the checkpoint ([INTEGRATION.md](INTEGRATION.md)
    §3). Extend it to per-storm normalization and gradient-check nothing breaks.
 5. ✓ *Done:* multi-step autoregressive backprop (`decoder_backward`). Add
