@@ -141,7 +141,58 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     return d;
 }
 
+Dataset dataset_load_bin(const char *path) {
+    Dataset d; memset(&d, 0, sizeof(d));
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(1); }
+    char magic[4]; int hdr[5];
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "TFB1", 4)) { fprintf(stderr, "%s: bad magic\n", path); exit(1); }
+    if (fread(hdr, sizeof(int), 5, f) != 5) { exit(1); }
+    d.n_samples = hdr[0]; d.in_len = hdr[1];
+    int feat = hdr[2]; d.pred_len = hdr[3]; int out = hdr[4];
+    d.d_num = 14; d.d_text = feat - d.d_num; d.prewindowed = 1;
+    assert(out == 2 && d.d_text > 0);
+    size_t in_sz = (size_t)d.in_len * feat, tg_sz = (size_t)d.pred_len * out;
+    d.win_in = malloc((size_t)d.n_samples * in_sz * sizeof(float));
+    d.win_tg = malloc((size_t)d.n_samples * tg_sz * sizeof(float));
+    for (int s = 0; s < d.n_samples; ++s) {
+        if (fread(&d.win_in[s * in_sz], sizeof(float), in_sz, f) != in_sz) { exit(1); }
+        if (fread(&d.win_tg[s * tg_sz], sizeof(float), tg_sz, f) != tg_sz) { exit(1); }
+    }
+    fclose(f);
+    /* standardize the numerical feature columns (0..d_num-1) across all steps */
+    for (int j = 0; j < d.d_num; ++j) {
+        double m = 0.0; long cnt = (long)d.n_samples * d.in_len;
+        for (int s = 0; s < d.n_samples; ++s)
+            for (int t = 0; t < d.in_len; ++t) m += d.win_in[s * in_sz + (size_t)t * feat + j];
+        m /= cnt;
+        double v = 0.0;
+        for (int s = 0; s < d.n_samples; ++s)
+            for (int t = 0; t < d.in_len; ++t) { double x = d.win_in[s * in_sz + (size_t)t * feat + j] - m; v += x * x; }
+        v = sqrt(v / cnt); if (v < 1e-6) v = 1.0;
+        d.mean[j] = (float)m; d.std[j] = (float)v;
+        for (int s = 0; s < d.n_samples; ++s)
+            for (int t = 0; t < d.in_len; ++t) {
+                size_t off = s * in_sz + (size_t)t * feat + j;
+                d.win_in[off] = (float)((d.win_in[off] - m) / v);
+            }
+    }
+    return d;
+}
+
 void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y) {
+    if (d->prewindowed) {
+        const int F = d->d_num + d->d_text;
+        const float *in = &d->win_in[(size_t)s * d->in_len * F];
+        for (int t = 0; t < d->in_len; ++t) {
+            memcpy(&xnum.data[t * d->d_num],  &in[(size_t)t * F], d->d_num * sizeof(float));
+            memcpy(&xtext.data[t * d->d_text], &in[(size_t)t * F + d->d_num], d->d_text * sizeof(float));
+        }
+        const float *tg = &d->win_tg[(size_t)s * d->pred_len * 2];
+        yprev.data[0] = tg[0]; yprev.data[1] = tg[1];   /* seed = first target (upstream) */
+        for (int k = 0; k < d->pred_len; ++k) { Y.data[k * 2] = tg[k * 2]; Y.data[k * 2 + 1] = tg[k * 2 + 1]; }
+        return;
+    }
     int r0 = d->start[s];
     for (int t = 0; t < d->in_len; ++t) {
         memcpy(&xnum.data[t * d->d_num],  &d->num[(size_t)(r0 + t) * d->d_num], d->d_num * sizeof(float));
@@ -177,5 +228,6 @@ void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
 
 void dataset_free(Dataset *d) {
     free(d->num); free(d->emb); free(d->lat); free(d->lon); free(d->gid); free(d->start);
+    free(d->win_in); free(d->win_tg);
     memset(d, 0, sizeof(*d));
 }

@@ -70,13 +70,17 @@ void linear_backward(Linear *l, const Mat dy, Mat dx) {
     const Mat x = l->xcache;
     const int T = dy.rows, out = l->out, in = l->in;
     assert(dy.cols == out && x.rows == T);
-    for (int i = 0; i < out; ++i) {                 /* dW += dy^T @ x */
-        for (int j = 0; j < in; ++j) {
-            float acc = 0.0f;
-            for (int p = 0; p < T; ++p) acc += dy.data[p * out + i] * x.data[p * in + j];
-            l->dW.data[i * in + j] += acc;
+    for (int p = 0; p < T; ++p) {                   /* dW += dy^T @ x (pij) */
+        const float *dyr = &dy.data[p * out];
+        const float *xr  = &x.data[p * in];
+        for (int i = 0; i < out; ++i) {
+            const float a = dyr[i];
+            float *dWr = &l->dW.data[i * in];
+            for (int j = 0; j < in; ++j) dWr[j] += a * xr[j];
         }
-        float bsum = 0.0f;                          /* db += colsum(dy) */
+    }
+    for (int i = 0; i < out; ++i) {                 /* db += colsum(dy) */
+        float bsum = 0.0f;
         for (int p = 0; p < T; ++p) bsum += dy.data[p * out + i];
         l->db[i] += bsum;
     }

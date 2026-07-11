@@ -36,14 +36,18 @@ void mat_copy(Mat dst, const Mat src) {
 }
 
 void mat_matmul(const Mat A, const Mat B, Mat out) {
+    /* ikj order: B and out are streamed row-contiguously (cache friendly,
+     * and auto-vectorizable). */
     assert(A.cols == B.rows && out.rows == A.rows && out.cols == B.cols);
     const int m = A.rows, k = A.cols, n = B.cols;
+    mat_zero(out);
     for (int i = 0; i < m; ++i) {
-        for (int j = 0; j < n; ++j) {
-            float acc = 0.0f;
-            for (int p = 0; p < k; ++p)
-                acc += A.data[i * k + p] * B.data[p * n + j];
-            out.data[i * n + j] = acc;
+        const float *Arow = &A.data[i * k];
+        float *Crow = &out.data[i * n];
+        for (int p = 0; p < k; ++p) {
+            const float a = Arow[p];
+            const float *Brow = &B.data[p * n];
+            for (int j = 0; j < n; ++j) Crow[j] += a * Brow[j];
         }
     }
 }
@@ -63,15 +67,18 @@ void mat_matmul_bt(const Mat A, const Mat B, Mat out) {
 }
 
 void mat_matmul_atb(const Mat A, const Mat B, Mat out) {
-    /* out = A^T @ B ; A[k,m], B[k,n], out[m,n] */
+    /* out = A^T @ B ; A[k,m], B[k,n], out[m,n].
+     * pij order: A and B are read row-contiguously, out streamed by row. */
     assert(A.rows == B.rows && out.rows == A.cols && out.cols == B.cols);
     const int k = A.rows, m = A.cols, n = B.cols;
-    for (int i = 0; i < m; ++i) {
-        for (int j = 0; j < n; ++j) {
-            float acc = 0.0f;
-            for (int p = 0; p < k; ++p)
-                acc += A.data[p * m + i] * B.data[p * n + j];
-            out.data[i * n + j] = acc;
+    mat_zero(out);
+    for (int p = 0; p < k; ++p) {
+        const float *Arow = &A.data[p * m];
+        const float *Brow = &B.data[p * n];
+        for (int i = 0; i < m; ++i) {
+            const float a = Arow[i];
+            float *Crow = &out.data[i * n];
+            for (int j = 0; j < n; ++j) Crow[j] += a * Brow[j];
         }
     }
 }
