@@ -247,27 +247,46 @@ See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, 
 
 ```bash
 TyphoFormer/
-├── typhoformer-c/             # Dependency-free pure-C reimplementation (MIT)
-│   ├── src/ include/ tests/   # tensor core, NN layers, model, data, training
-│   ├── tools/                 # .npy-dict → .tfb data converter
-│   └── Makefile               # `make test` / `make && ./typhoformer`
 │
-├── legacy/                    # Original PyTorch implementation (see legacy/README.md)
-│   ├── model/                 # PGF, ST-Transformer, full model
-│   └── *.py                   # training, eval, data prep, text/embedding generation
+├── typhoformer-c/                      # ⚡ Dependency-free pure-C reimplementation (MIT)
+│   ├── include/                        #   public headers
+│   │   ├── tensor.h                    #     matrix primitives
+│   │   ├── nn.h                        #     Linear, LayerNorm, FFN, attention, block
+│   │   ├── model.h                     #     PGF, ST-encoder, AR decoder, full model
+│   │   ├── data.h                      #     CSV + .npy loader
+│   │   └── optim.h                     #     Adam
+│   ├── src/                            #   implementations
+│   │   ├── tensor.c  nn.c  model.c     #     core + layers + model
+│   │   ├── data.c    optim.c           #     data pipeline + optimizer
+│   │   └── train.c                     #     training/eval entry point (main)
+│   ├── tests/                          #   gradient checks + data-loader test
+│   │   └── test_{tensor,nn,model,data}.c
+│   ├── tools/npy_dict_to_bin.py        #   .npy-dict → .tfb data converter
+│   ├── Makefile  LICENSE  README.md    #   `make test` / `make && ./typhoformer`
 │
-├── data/                      # Processed typhoon datasets (.npy)
-│   ├── train/                 # train_part1.zip + train_part2.zip → unzip here
-│   ├── val/                   # ready-to-use .npy samples
-│   └── test/                  # test.zip → unzip here
+├── legacy/                             # 🗄️ Original PyTorch implementation (see legacy/README.md)
+│   ├── model/
+│   │   ├── STTransformer.py            #     spatio-temporal Transformer backbone
+│   │   ├── PGF_module.py               #     Prompt-aware Gating Fusion module
+│   │   └── TyphoFormer.py              #     full model (PGF + encoder + AR decoder)
+│   ├── train_typhoformer.py            #   training entry point
+│   ├── eval_typhoformer.py             #   evaluation script
+│   ├── prepare_typhoformer_data.py     #   dataset preparation (sliding windows)
+│   ├── generate_text_description_new.py#   GPT-4o language-description generation
+│   ├── generate_text_embeddings.py     #   MiniLM (all-MiniLM-L6-v2) embeddings
+│   └── utils.py
 │
-├── embedding_chunks/          # MiniLM embeddings of the LLM descriptions
-│   ├── emb_chunk_000.npy
-│   └── ... emb_chunk_006.npy
+├── data/                               # 📦 Processed typhoon datasets (.npy) — shared
+│   ├── train/                          #   train_part1.zip + train_part2.zip → unzip here
+│   ├── val/                            #   ready-to-use .npy samples
+│   └── test/                           #   test.zip → unzip here
+├── embedding_chunks/                   #   MiniLM embeddings of the LLM descriptions
+│   └── emb_chunk_000.npy … 006.npy
 │
-├── assets/                    # Figures (results, algorithm diagrams, demo GIF)
-├── HURDAT_2new_3000.csv       # Raw typhoon records (2020–2024 sample)
-└── TyphoFormer_algorithm.tex  # Paper-style pseudocode (LaTeX)
+├── assets/                             # 🖼️  Figures (results, algorithm diagrams, demo GIF)
+├── HURDAT_2new_3000.csv                #    Raw typhoon records (2020–2024 sample)
+├── TyphoFormer_algorithm.tex           #    Paper-style pseudocode (LaTeX)
+└── README.md
 ```
 
 ## 🧩 Data Preparation
