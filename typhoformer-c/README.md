@@ -21,8 +21,11 @@ This directory is an **independent implementation written from the published
 method** — the paper and the algorithm pseudocode / data-flow specification in
 the repository root (`TyphoFormer_algorithm.tex`, README figures) — *not* a
 line-by-line translation of the upstream Python. Because it is original code
-implementing (non-copyrightable) algorithms and math, it can carry its own
-license. A `LICENSE` will be added once the copyright holder is confirmed.
+implementing (non-copyrightable) algorithms and math, it carries its own
+license: **MIT** (see [`LICENSE`](LICENSE)). This license applies only to the
+contents of this `typhoformer-c/` directory, not to the upstream repository.
+The copyright line reads "TyphoFormer-C contributors" — edit it to your name
+or organization as appropriate.
 
 ## Build & run
 
@@ -31,11 +34,34 @@ cd typhoformer-c
 make            # build the ./typhoformer training binary
 make test       # build and run all unit tests (gradient checks + data loader)
 
-./typhoformer 30                     # train 30 epochs on the bundled data
-./typhoformer 30 ../HURDAT_2new_3000.csv ../embedding_chunks
+./typhoformer 30                     # 30 epochs, compact demo config, CSV data
+./typhoformer 5 --full               # full paper config (d_model=256, 3 layers)
+./typhoformer 30 --csv=PATH --emb=DIR
 ```
 
 Requires only a C11 compiler (`gcc`/`clang`) and `make`.
+
+### Consuming the repository's pre-split `.npy` data
+
+The pre-split sample files under `data/{train,val,test}/` are pickled Python
+dicts, which a pure-C loader cannot read directly. Convert them once (needs
+Python + numpy) to a flat `.tfb` binary, then train from it:
+
+```bash
+python tools/npy_dict_to_bin.py ../data/val ../data/val.tfb
+./typhoformer 20 --bin=../data/val.tfb
+```
+
+> Those files store only `input` (numerical + embedding features) and
+> `target` — no coordinates — so this path seeds the decoder with the first
+> target coordinate, reproducing the upstream setup. The CSV path uses the
+> true last-observed coordinate and is the sound default.
+
+### Performance
+
+Math is hand-written and cache-blocked (`ikj`/`pij` loop orders), built at
+`-O3`. The compact demo config runs ~6 s/epoch and the full 5.1 M-parameter
+config ~190 s/epoch, single-threaded, on the bundled data.
 
 ## Status — complete
 

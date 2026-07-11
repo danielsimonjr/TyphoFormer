@@ -18,11 +18,19 @@ typedef struct {
     float  mean[64], std[64];
     int   *start;        /* n_samples window start record indices */
     int    n_samples;
+    int    prewindowed;  /* 1 => samples come from a .tfb file (below) */
+    float *win_in;       /* n_samples * in_len * (d_num+d_text) */
+    float *win_tg;       /* n_samples * pred_len * 2 */
 } Dataset;
 
 /* Load records from `csv` and embeddings from `embdir` (emb_chunk_*.npy),
  * build sliding windows, and standardize the numerical features. */
 Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_len);
+
+/* Load pre-windowed samples from a .tfb file produced by
+ * tools/npy_dict_to_bin.py. These files carry no coordinates, so the decoder
+ * is seeded with the first target coordinate (as in the upstream code). */
+Dataset dataset_load_bin(const char *path);
 
 /* Materialise sample `s` into caller-provided matrices:
  *   xnum [in_len,d_num], xtext [in_len,d_text], yprev [1,2], Y [pred_len,2].

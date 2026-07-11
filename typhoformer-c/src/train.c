@@ -44,22 +44,39 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
 }
 
 int main(int argc, char **argv) {
-    int epochs = (argc > 1) ? atoi(argv[1]) : 10;
-    const char *csv = (argc > 2) ? argv[2] : "../HURDAT_2new_3000.csv";
-    const char *emb = (argc > 3) ? argv[3] : "../embedding_chunks";
+    int epochs = 10, full = 0;
+    const char *csv = "../HURDAT_2new_3000.csv";
+    const char *emb = "../embedding_chunks";
+    const char *bin = NULL;
     const float lambda = 0.1f;
     const int   batch = 8;
+    for (int i = 1; i < argc; ++i) {
+        if      (!strcmp(argv[i], "--full"))          full = 1;
+        else if (!strncmp(argv[i], "--csv=", 6))      csv = argv[i] + 6;
+        else if (!strncmp(argv[i], "--emb=", 6))      emb = argv[i] + 6;
+        else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
+        else if (argv[i][0] >= '0' && argv[i][0] <= '9') epochs = atoi(argv[i]);
+    }
 
     nn_seed(20260711);
 
-    /* A compact instance of the real architecture (smaller dims for a fast
-     * self-contained demo; the full paper config runs through the same code). */
-    Config c;
-    c.d_num = 14; c.d_text = 384; c.d_model = 64; c.out_dim = 2;
-    c.in_len = 12; c.pred_len = 1; c.d_ff = 128; c.n_heads = 4; c.n_layers = 2;
+    /* Full paper configuration, or a compact instance for a fast demo
+     * (identical code path, smaller dims). */
+    Config c = config_default();
+    if (!full) { c.d_model = 64; c.d_ff = 128; c.n_layers = 2; }
 
-    printf("Loading data: %s + %s\n", csv, emb);
-    Dataset ds = dataset_load(csv, emb, c.in_len, c.pred_len);
+    Dataset ds;
+    if (bin) {
+        printf("Loading pre-windowed data: %s\n", bin);
+        ds = dataset_load_bin(bin);
+        c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text;
+        printf("NOTE: .tfb files carry no coordinates, so the decoder is seeded with the\n"
+               "      first target coordinate (reproducing the upstream setup). For a\n"
+               "      sound last-observed-coordinate seed, use the CSV path instead.\n");
+    } else {
+        printf("Loading data: %s + %s\n", csv, emb);
+        ds = dataset_load(csv, emb, c.in_len, c.pred_len);
+    }
     int *train, *val, ntr, nva;
     dataset_split(&ds, 0.15f, 42, &train, &ntr, &val, &nva);
     printf("records=%d samples=%d  train=%d val=%d\n", ds.n_records, ds.n_samples, ntr, nva);

@@ -1,6 +1,6 @@
 # TyphoFormer-C — pure C, standard library only.
 CC      ?= gcc
-CFLAGS  := -std=c11 -O2 -Wall -Wextra -Wpedantic -Iinclude
+CFLAGS  := -std=c11 -O3 -Wall -Wextra -Wpedantic -Iinclude
 LDLIBS  := -lm
 
 SRC     := $(wildcard src/*.c)
