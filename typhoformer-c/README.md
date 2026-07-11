@@ -4,6 +4,19 @@ A **clean-room, pure-C reimplementation** of the TyphoFormer typhoon-track
 forecasting model — Prompt-aware Gating Fusion (PGF) + a spatio-temporal
 Transformer encoder + an autoregressive decoder.
 
+## 📚 Documentation
+
+In-depth docs for students and engineers live in [`docs/`](docs/):
+
+| Doc | For | Contents |
+|:--|:--|:--|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | students | The model + **full forward/backward math** for every layer, matching the code. |
+| [docs/API.md](docs/API.md) | engineers | Complete API reference + the **memory / ownership / concurrency** model. |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | engineers | Embed as a library (`make lib`), inference from a checkpoint, byte-exact file formats, serving. |
+| [docs/EXTENDING.md](docs/EXTENDING.md) | both | Add layers/ops with the gradient-check discipline; architecture changes; student projects. |
+
+Start at [docs/README.md](docs/README.md) for the suggested learning path.
+
 ## Scope & design
 
 - **Pure C, standard library only.** No third-party dependencies — all math
@@ -106,6 +119,7 @@ Single-threaded on CPU; native SIMD roughly halves the full-config epoch time.
 | Target | What it does |
 |:--|:--|
 | `make` | Build `./typhoformer` (portable `-O3`). |
+| `make lib` | Build `libtyphoformer.a` for embedding in another application (see [docs/INTEGRATION.md](docs/INTEGRATION.md)). |
 | `make test` | Build + run all unit tests (gradient checks + data loader). |
 | `make test-san` | Rebuild with **AddressSanitizer + UBSan** and run the tests. |
 | `make NATIVE=1` | Build with `-march=native -funroll-loops` (faster, non-portable binary). |

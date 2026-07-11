@@ -10,3 +10,4 @@ typhoformer
 *.out
 *.ckpt
 *.tfb
+*.a

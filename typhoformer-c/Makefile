@@ -21,13 +21,18 @@ OBJ     := $(SRC:.c=.o)
 TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
-.PHONY: all test test-san clean
+.PHONY: all lib test test-san clean
 
 all: typhoformer
 
 # Main training binary links all objects (including src/train.o's main).
 typhoformer: $(OBJ)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+# Static library for embedding the model in another application (no main).
+lib: libtyphoformer.a
+libtyphoformer.a: $(BUILD)
+	ar rcs $@ $^
 
 # Unit tests link against the library objects (excluding the main).
 tests/%: tests/%.c $(BUILD)
@@ -45,4 +50,4 @@ src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f src/*.o $(TESTS) typhoformer typhoformer_weights.bin
+	rm -f src/*.o $(TESTS) typhoformer libtyphoformer.a *.ckpt *.tfb
