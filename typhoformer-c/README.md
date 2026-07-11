@@ -103,6 +103,8 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
 | `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |
 | `--prenorm` | Pre-norm transformer blocks (LN before each sublayer) instead of post-norm. | off |
+| `--timebias` | ALiBi-style temporal-distance bias in the temporal attention (`score[i,j] −= slopeₕ·\|i−j\|`) — a parameter-free sense of recency. | off |
+| `--co_spatial` | **Real** multi-node spatial attention: the encoded context attends over the relative states of storms active at the same timestep. Serial path only (`--threads=1`). | off |
 | `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
 | `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |

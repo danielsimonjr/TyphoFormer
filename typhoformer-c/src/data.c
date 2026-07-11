@@ -135,7 +135,7 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     if (!f) { die("cannot open %s", csv); }
     int cap = 4096; d.num = malloc((size_t)cap * d.d_num * sizeof(float));
     d.lat = malloc(cap * sizeof(float)); d.lon = malloc(cap * sizeof(float));
-    d.gid = malloc(cap * sizeof(int));
+    d.gid = malloc(cap * sizeof(int)); d.tkey = malloc(cap * sizeof(long));
     char line[4096]; int n = 0, gid = -1; char prev_id[64] = "";
     int lineno = 0;
     while (fgets(line, sizeof(line), f)) {
@@ -155,10 +155,12 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
             d.lat = realloc(d.lat, cap * sizeof(float));
             d.lon = realloc(d.lon, cap * sizeof(float));
             d.gid = realloc(d.gid, cap * sizeof(int));
+            d.tkey = realloc(d.tkey, cap * sizeof(long));
         }
         char *id = trim(fields[IDCOL]);
         if (strcmp(id, prev_id) != 0) { ++gid; strncpy(prev_id, id, 63); prev_id[63] = 0; }
         d.gid[n] = gid;
+        d.tkey[n] = atol(trim(fields[1])) * 10000L + atol(trim(fields[2]));  /* date*1e4 + time */
         d.lat[n] = parse_latlon(fields[LATCOL]);
         d.lon[n] = parse_latlon(fields[LONCOL]);
         for (int j = 0; j < d.d_num; ++j) d.num[n * d.d_num + j] = (float)atof(trim(fields[NUMCOL[j]]));
@@ -230,6 +232,51 @@ void dataset_add_motion(Dataset *d) {
         nm[(size_t)i * nd + old + 3] = same ? d->lon[i] - d->lon[i - 1] : 0.0f;
     }
     free(d->num); d->num = nm; d->d_num = nd;
+}
+
+/* ---- co-active spatial neighbours ----------------------------------- */
+typedef struct { long key; int idx; } TKPair;
+static int tk_cmp(const void *a, const void *b) {
+    long ka = ((const TKPair *)a)->key, kb = ((const TKPair *)b)->key;
+    return (ka < kb) ? -1 : (ka > kb) ? 1 : 0;
+}
+void dataset_build_neighbors(Dataset *d) {
+    if (d->prewindowed || !d->tkey) return;
+    int n = d->n_records;
+    free(d->nbr); free(d->nbr_cnt);
+    d->nbr = (float *)calloc((size_t)n * TF_NBR_K * TF_NBR_NF, sizeof(float));
+    d->nbr_cnt = (int *)calloc((size_t)n, sizeof(int));
+    TKPair *pr = (TKPair *)malloc((size_t)n * sizeof(TKPair));
+    for (int i = 0; i < n; ++i) { pr[i].key = d->tkey[i]; pr[i].idx = i; }
+    qsort(pr, (size_t)n, sizeof(TKPair), tk_cmp);
+    int g0 = 0;
+    while (g0 < n) {                                    /* one group per shared timestamp */
+        int g1 = g0;
+        while (g1 < n && pr[g1].key == pr[g0].key) ++g1;
+        for (int a = g0; a < g1; ++a) {
+            int i = pr[a].idx, cnt = 0;
+            for (int b = g0; b < g1 && cnt < TF_NBR_K; ++b) {
+                int j = pr[b].idx;
+                if (j == i || d->gid[j] == d->gid[i]) continue;   /* skip self / same storm */
+                float *o = &d->nbr[((size_t)i * TF_NBR_K + cnt) * TF_NBR_NF];
+                o[0] = d->lat[j] - d->lat[i];                     /* relative lat */
+                o[1] = d->lon[j] - d->lon[i];                     /* relative lon */
+                o[2] = d->num[(size_t)j * d->d_num] - d->num[(size_t)i * d->d_num]; /* Δmax_wind (col 0) */
+                ++cnt;
+            }
+            d->nbr_cnt[i] = cnt;
+        }
+        g0 = g1;
+    }
+    free(pr);
+}
+/* Neighbours of sample s at its seed (last observed) timestep. */
+void dataset_neighbors(const Dataset *d, int s, Mat nbrmat, int *cnt) {
+    if (d->prewindowed || !d->nbr) { *cnt = 0; return; }
+    int rec = d->start[s] + d->in_len - 1;
+    *cnt = d->nbr_cnt[rec];
+    memcpy(nbrmat.data, &d->nbr[(size_t)rec * TF_NBR_K * TF_NBR_NF],
+           (size_t)TF_NBR_K * TF_NBR_NF * sizeof(float));
 }
 
 void dataset_standardize(Dataset *d) {
@@ -460,5 +507,6 @@ void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
 void dataset_free(Dataset *d) {
     free(d->num); free(d->emb); free(d->lat); free(d->lon); free(d->gid); free(d->start);
     free(d->win_in); free(d->win_tg); free(d->win_seed); free(d->storm_split);
+    free(d->tkey); free(d->nbr); free(d->nbr_cnt);
     memset(d, 0, sizeof(*d));
 }
