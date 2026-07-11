@@ -104,6 +104,7 @@ static int cmd_train(int argc, char **argv) {
     int delta = 0;                    /* decoder predicts displacement     */
     int cv = 0;                       /* constant-velocity decoder (2nd order) */
     int gru = 0;                      /* recurrent (GRU) decoder correction */
+    int xattn = 0;                    /* decoder cross-attention over encoder seq */
     int km_loss = 0;                  /* weight longitude error by cos^2(lat) */
     int no_spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
     unsigned long seed = 20260711, split_seed = 42;
@@ -135,6 +136,7 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--delta"))          delta = 1;
         else if (!strcmp(argv[i], "--cv"))             cv = 1;
         else if (!strcmp(argv[i], "--gru"))          { gru = 1; cv = 1; }
+        else if (!strcmp(argv[i], "--xattn"))        { xattn = 1; cv = 1; }
         else if (!strcmp(argv[i], "--km_loss"))        km_loss = 1;
         else if (!strcmp(argv[i], "--no_spatial"))     no_spatial = 1;
         else if (!strcmp(argv[i], "--posenc"))         posenc = 1;
@@ -176,13 +178,15 @@ static int cmd_train(int argc, char **argv) {
            ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed, ds.d_num,
            motion ? " (+motion)" : "", no_text ? " | NO-TEXT" : "");
     if (gru)        printf("decoder: constant-velocity + GRU memory (recurrent curvature)\n");
+    else if (xattn) printf("decoder: constant-velocity + cross-attention over encoder sequence\n");
     else if (cv)    printf("decoder: constant-velocity mode (anchor at CLIPER, learn curvature)\n");
     else if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
     if (km_loss && threads > 1) printf("note: --km_loss applies on the serial path; use --threads=1\n");
 
     if (threads < 1) threads = 1;
     /* architecture options — all set BEFORE model_new (they change the param set) */
-    if (gru)        model_set_gru(1);         /* gru implies the cv anchor */
+    if (gru)        model_set_gru(1);         /* gru/xattn anchor at cv in their own branch */
+    else if (xattn) model_set_xattn(1);
     else if (cv)    model_set_cv(1);          /* cv is a superset of delta; takes precedence */
     else if (delta) model_set_delta(1);
     model_set_no_spatial(no_spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
@@ -310,6 +314,7 @@ static int cmd_eval(int argc, char **argv) {
         else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
         else if (!strcmp(argv[i], "--cv"))            model_set_cv(1);
         else if (!strcmp(argv[i], "--gru"))           model_set_gru(1);
+        else if (!strcmp(argv[i], "--xattn"))         model_set_xattn(1);
         else if (!strcmp(argv[i], "--no_spatial"))    model_set_no_spatial(1);
         else if (!strcmp(argv[i], "--posenc"))        model_set_posenc(1);
         else if (!strcmp(argv[i], "--pool=last"))     model_set_pool_last(1);

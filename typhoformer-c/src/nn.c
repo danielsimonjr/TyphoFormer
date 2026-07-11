@@ -310,6 +310,95 @@ void gru_free(GRU *g) {
     mat_free(&g->s_dzru); mat_free(&g->s_dzn); mat_free(&g->s_dg);
 }
 
+/* ---- Single-head cross-attention ------------------------------------ */
+CrossAttn xattn_new(int qin, int d, int max_steps, ParamList *pl, const char *name) {
+    CrossAttn a; a.qin = qin; a.d = d; a.max_steps = max_steps; a.T = 0;
+    a.lq = linear_new(qin, d, pl, name);
+    a.lk = linear_new(d,   d, pl, name);
+    a.lv = linear_new(d,   d, pl, name);
+    a.lo = linear_new(d,   d, pl, name);
+    a.K = (Mat){0,0,NULL}; a.V = (Mat){0,0,NULL}; a.memc = (Mat){0,0,NULL};
+    a.qc  = (Mat *)calloc(max_steps, sizeof(Mat));
+    a.ac  = (Mat *)calloc(max_steps, sizeof(Mat));
+    a.cxc = (Mat *)calloc(max_steps, sizeof(Mat));
+    a.xc  = (Mat *)calloc(max_steps, sizeof(Mat));
+    a.s_dctx = (Mat){0,0,NULL}; a.s_da = (Mat){0,0,NULL}; a.s_dsc = (Mat){0,0,NULL};
+    a.s_dq = (Mat){0,0,NULL}; a.s_dK = (Mat){0,0,NULL}; a.s_dV = (Mat){0,0,NULL};
+    return a;
+}
+void xattn_set_memory(CrossAttn *a, const Mat mem) {
+    const int T = mem.rows, D = a->d;
+    a->T = T;
+    ensure(&a->memc, T, D); mat_copy(a->memc, mem);
+    ensure(&a->K, T, D); ensure(&a->V, T, D);
+    linear_forward(&a->lk, mem, a->K);            /* caches mem in lk.xcache */
+    linear_forward(&a->lv, mem, a->V);            /* caches mem in lv.xcache */
+    ensure(&a->s_dK, T, D); ensure(&a->s_dV, T, D);
+    mat_zero(a->s_dK); mat_zero(a->s_dV);         /* accumulate over steps */
+}
+void xattn_forward(CrossAttn *a, int step, const Mat x, Mat out) {
+    const int T = a->T, D = a->d;
+    const float scale = 1.0f / sqrtf((float)D);
+    ensure(&a->qc[step], 1, D); ensure(&a->ac[step], 1, T);
+    ensure(&a->cxc[step], 1, D); ensure(&a->xc[step], 1, a->qin);
+    mat_copy(a->xc[step], x);
+    linear_forward(&a->lq, x, a->qc[step]);       /* q [1,D] (caches x, overwritten per step) */
+    Mat q = a->qc[step], av = a->ac[step], ctx = a->cxc[step];
+    for (int j = 0; j < T; ++j) {                 /* scores = q·K_j * scale */
+        const float *kj = &a->K.data[j * D];
+        float s = 0.0f; for (int i = 0; i < D; ++i) s += q.data[i] * kj[i];
+        av.data[j] = s * scale;
+    }
+    float mx = av.data[0]; for (int j = 1; j < T; ++j) if (av.data[j] > mx) mx = av.data[j];
+    double sum = 0.0; for (int j = 0; j < T; ++j) { av.data[j] = expf(av.data[j] - mx); sum += av.data[j]; }
+    for (int j = 0; j < T; ++j) av.data[j] /= (float)sum;   /* softmax */
+    for (int i = 0; i < D; ++i) {                 /* ctx = Σ a_j V_j */
+        float c = 0.0f; for (int j = 0; j < T; ++j) c += av.data[j] * a->V.data[j * D + i];
+        ctx.data[i] = c;
+    }
+    linear_forward(&a->lo, ctx, out);             /* out = o(ctx); caches ctx per step */
+}
+void xattn_backward_step(CrossAttn *a, int step, const Mat dout, Mat dx) {
+    const int T = a->T, D = a->d;
+    const float scale = 1.0f / sqrtf((float)D);
+    ensure(&a->s_dctx, 1, D); ensure(&a->s_da, 1, T); ensure(&a->s_dsc, 1, T); ensure(&a->s_dq, 1, D);
+    Mat q = a->qc[step], av = a->ac[step];
+    Mat dctx = a->s_dctx, da = a->s_da, dsc = a->s_dsc, dq = a->s_dq;
+    mat_copy(a->lo.xcache, a->cxc[step]);
+    linear_backward(&a->lo, dout, dctx);          /* dout -> dctx */
+    for (int j = 0; j < T; ++j) {                 /* ctx = Σ a_j V_j :  da_j, dV_j */
+        const float *vj = &a->V.data[j * D];
+        float g = 0.0f;
+        for (int i = 0; i < D; ++i) { g += dctx.data[i] * vj[i]; a->s_dV.data[j * D + i] += av.data[j] * dctx.data[i]; }
+        da.data[j] = g;
+    }
+    double dot = 0.0; for (int j = 0; j < T; ++j) dot += av.data[j] * da.data[j];   /* softmax backward */
+    for (int j = 0; j < T; ++j) dsc.data[j] = av.data[j] * (da.data[j] - (float)dot) * scale;
+    for (int i = 0; i < D; ++i) {                 /* scores = q·Kᵀ:  dq, dK */
+        float g = 0.0f;
+        for (int j = 0; j < T; ++j) { g += dsc.data[j] * a->K.data[j * D + i]; a->s_dK.data[j * D + i] += dsc.data[j] * q.data[i]; }
+        dq.data[i] = g;
+    }
+    mat_copy(a->lq.xcache, a->xc[step]);
+    linear_backward(&a->lq, dq, dx);              /* dq -> dx [1,qin] */
+}
+void xattn_backward_memory(CrossAttn *a, Mat dmem) {
+    const int T = a->T, D = a->d;
+    linear_backward(&a->lk, a->s_dK, dmem);       /* dK -> dmem (lk.xcache=mem) */
+    ensure(&a->s_dctx, 1, T * D);                 /* borrow as [T,D] temp for lv path */
+    Mat tmp = { T, D, a->s_dctx.data };
+    linear_backward(&a->lv, a->s_dV, tmp);        /* dV -> tmp */
+    if (dmem.data) for (int i = 0; i < T * D; ++i) dmem.data[i] += tmp.data[i];
+}
+void xattn_free(CrossAttn *a) {
+    linear_free(&a->lq); linear_free(&a->lk); linear_free(&a->lv); linear_free(&a->lo);
+    mat_free(&a->K); mat_free(&a->V); mat_free(&a->memc);
+    for (int s = 0; s < a->max_steps; ++s) { mat_free(&a->qc[s]); mat_free(&a->ac[s]); mat_free(&a->cxc[s]); mat_free(&a->xc[s]); }
+    free(a->qc); free(a->ac); free(a->cxc); free(a->xc);
+    mat_free(&a->s_dctx); mat_free(&a->s_da); mat_free(&a->s_dsc);
+    mat_free(&a->s_dq); mat_free(&a->s_dK); mat_free(&a->s_dV);
+}
+
 /* ---- softmax over rows (in place) ----------------------------------- */
 static void softmax_rows(Mat m) {
     for (int i = 0; i < m.rows; ++i) {

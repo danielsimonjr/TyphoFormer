@@ -109,6 +109,10 @@ int main(void) {
     fail |= check_model("gru", 1);
     fail |= check_model("gru+multistep", 3);
     model_set_gru(0);
+    model_set_xattn(1);
+    fail |= check_model("xattn", 1);
+    fail |= check_model("xattn+multistep", 3);
+    model_set_xattn(0);
     /* encoder architecture variants (each set, checked, reset) */
     model_set_no_spatial(1); fail |= check_model("no_spatial", 1); model_set_no_spatial(0);
     model_set_posenc(1);     fail |= check_model("posenc", 1);     model_set_posenc(0);

@@ -22,9 +22,19 @@ int  model_delta(void) { return g_delta; }
 static int g_cv = 0;
 void model_set_cv(int on) { g_cv = on; }
 
-/* Recurrent (GRU) decoder correction. Implies the cv anchor. Off by default. */
+/* Recurrent (GRU) decoder correction. Its rollout branch anchors at
+ * constant-velocity itself (zero-init fc_out), so it needs no separate g_cv.
+ * Off by default. */
 static int g_gru = 0;
-void model_set_gru(int on) { g_gru = on; if (on) g_cv = 1; }
+void model_set_gru(int on) { g_gru = on; }
+
+/* Decoder cross-attention over the encoder sequence (declared here so the
+ * setter below sees it). */
+static int g_xattn = 0;
+
+/* Cross-attention decoder correction (anchors at cv in its own branch) and makes
+ * the encoder expose its pre-pool sequence. Off by default. */
+void model_set_xattn(int on) { g_xattn = on; }
 
 /* Encoder architecture options (read at encoder_new time). Off by default. */
 static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0, g_co_spatial = 0;
@@ -156,6 +166,9 @@ Encoder encoder_new(const Config *c, ParamList *pl) {
         if (e.use_spatial) e.spatial[l] = block_new(c->d_model, c->n_heads, c->d_ff, 1, pl, "enc.spatial");
     }
     e.tmix = timemix_new(c->in_len, 1, pl);
+    e.use_encseq = g_xattn;                          /* expose the pre-pool sequence for --xattn */
+    e.encseq = NULLMAT; e.dencseq = NULLMAT;
+    if (e.use_encseq) { e.encseq = mat_new(c->in_len, c->d_model); e.dencseq = mat_new(c->in_len, c->d_model); }
     e.b0  = mat_new(c->in_len, c->d_model); e.b1  = mat_new(c->in_len, c->d_model);
     e.db0 = mat_new(c->in_len, c->d_model); e.db1 = mat_new(c->in_len, c->d_model);
     e.tmid = mat_new(1, c->d_model); e.dtmid = mat_new(1, c->d_model);
@@ -171,6 +184,7 @@ void encoder_forward(Encoder *e, const Mat xtilde, Mat henc) {
         block_forward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
         if (e->use_spatial) { block_forward(&e->spatial[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
     }
+    if (e->use_encseq) mat_copy(e->encseq, cur);   /* expose the pre-pool sequence (--xattn memory) */
     if (e->pool_last) memcpy(e->tmid.data, &cur.data[(T - 1) * D], D * sizeof(float)); /* last step */
     else              timemix_forward(&e->tmix, cur, e->tmid);                          /* [1,D] */
     linear_forward(&e->output_proj, e->tmid, henc);   /* [1,D] */
@@ -181,6 +195,7 @@ void encoder_backward(Encoder *e, const Mat dhenc, Mat dxtilde) {
     Mat cur = e->db0, nxt = e->db1, tmp;
     if (e->pool_last) { mat_zero(cur); memcpy(&cur.data[(T - 1) * D], e->dtmid.data, D * sizeof(float)); }
     else              timemix_backward(&e->tmix, e->dtmid, cur);
+    if (e->use_encseq) for (int i = 0; i < T * D; ++i) cur.data[i] += e->dencseq.data[i];  /* + xattn grad */
     for (int l = L - 1; l >= 0; --l) {
         if (e->use_spatial) { block_backward(&e->spatial[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
         block_backward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
@@ -196,6 +211,7 @@ void encoder_free(Encoder *e) {
     }
     free(e->temporal); free(e->spatial); timemix_free(&e->tmix);
     mat_free(&e->posenc); mat_free(&e->dposenc);
+    mat_free(&e->encseq); mat_free(&e->dencseq);
     mat_free(&e->b0); mat_free(&e->b1); mat_free(&e->db0); mat_free(&e->db1);
     mat_free(&e->tmid); mat_free(&e->dtmid);
 }
@@ -205,8 +221,16 @@ void encoder_free(Encoder *e) {
  * ===================================================================== */
 Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
-    d.use_cv = g_cv; d.use_gru = g_gru;
-    if (g_gru) {
+    d.use_cv = g_cv; d.use_gru = g_gru; d.use_xattn = g_xattn;
+    if (g_xattn) {
+        /* per-step context = cross-attention([p;v] query over encoder sequence);
+         * fed to the cv MLP in place of the static pooled context. */
+        d.xattn = xattn_new(2 * c->out_dim, c->d_model, c->pred_len, pl, "dec.xattn");
+        d.fc1 = linear_new(c->d_model + 2 * c->out_dim, c->d_model, pl, "dec.fc1");
+        d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
+        memset(d.fc2.W.data, 0, (size_t)d.fc2.out * d.fc2.in * sizeof(float));   /* start at cv */
+        memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
+    } else if (g_gru) {
         /* GRU correction: input is [p; v] (2*out); hidden = d_model, initialised
          * from the encoder context. fc_out projects hidden -> out, zero-init so
          * the untrained model still starts at constant-velocity. */
@@ -231,11 +255,41 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
     d.s_da = NULLMAT; d.s_dh1 = NULLMAT; d.s_dz = NULLMAT;
     d.s_dyt = NULLMAT; d.s_dynext = NULLMAT; d.s_dvnext = NULLMAT; d.s_dhacc = NULLMAT;
     d.s_hid0 = NULLMAT; d.s_dhid = NULLMAT; d.s_dhc = NULLMAT; d.s_dx2 = NULLMAT;
+    d.s_xq = NULLMAT; d.s_dmem = g_xattn ? mat_new(c->in_len, c->d_model) : NULLMAT;
     return d;
 }
 void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vseed, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
     assert(steps <= d->max_steps);
+    if (d->use_xattn) {
+        /* Constant-velocity rollout whose context is per-step cross-attention over
+         * the encoder sequence (memory set by the model via xattn_set_memory).
+         * fc1 input is [context_s ; p ; v]; fc2 zero-init -> starts at cv. */
+        ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O);
+        ensure(&d->s_v, 1, O); ensure(&d->s_hid0, 1, H); ensure(&d->s_xq, 1, 2 * O);
+        Mat p = d->s_yt, a = d->s_a, c = d->s_ytn, v = d->s_v, ctx = d->s_hid0, xq = d->s_xq;
+        mat_copy(p, yprev);
+        if (vseed.data) mat_copy(v, vseed); else mat_zero(v);
+        for (int s = 0; s < steps; ++s) {
+            ensure(&d->zc[s], 1, H + 2 * O); ensure(&d->h1c[s], 1, H); ensure(&d->ac[s], 1, H);
+            memcpy(&xq.data[0], p.data, O * sizeof(float));        /* query = [p ; v] */
+            memcpy(&xq.data[O], v.data, O * sizeof(float));
+            xattn_forward(&d->xattn, s, xq, ctx);                  /* context over encoder seq */
+            memcpy(&d->zc[s].data[0],       ctx.data, H * sizeof(float));  /* z = [ctx ; p ; v] */
+            memcpy(&d->zc[s].data[H],       p.data,   O * sizeof(float));
+            memcpy(&d->zc[s].data[H + O],   v.data,   O * sizeof(float));
+            linear_forward(&d->fc1, d->zc[s], d->h1c[s]);
+            mat_copy(a, d->h1c[s]); mat_relu(a); mat_copy(d->ac[s], a);
+            linear_forward(&d->fc2, a, c);
+            for (int i = 0; i < O; ++i) {
+                float y = p.data[i] + v.data[i] + c.data[i];
+                v.data[i] += c.data[i];
+                p.data[i]  = y;
+                preds.data[s * O + i] = y;
+            }
+        }
+        return;
+    }
     if (d->use_gru) {
         /* Recurrent constant-velocity rollout. Same anchor arithmetic as cv, but
          * the correction is c = fc_out(GRU([p;v], hid)) with hid carried across
@@ -311,6 +365,38 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
  * next step's decoder input, so gradients from step s+1 flow back into it. */
 void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     const int H = d->hidden, O = d->out, steps = dpreds.rows;
+    if (d->use_xattn) {
+        /* Backward of the cross-attention cv rollout. dp/dv threading matches cv;
+         * fc1's context-grad (dz[0:H]) drives the per-step cross-attention backward,
+         * whose query-grad adds into dp/dv and whose K/V-grad accumulates for the
+         * memory. The pooled context is unused here, so dhenc is zero and all the
+         * encoder gradient flows through the attended memory (s_dmem). */
+        ensure(&d->s_da, 1, H); ensure(&d->s_dh1, 1, H); ensure(&d->s_dz, 1, H + 2 * O);
+        ensure(&d->s_dyt, 1, O); ensure(&d->s_dynext, 1, O); ensure(&d->s_dvnext, 1, O);
+        ensure(&d->s_dhc, 1, H); ensure(&d->s_dx2, 1, 2 * O);
+        Mat da = d->s_da, dh1 = d->s_dh1, dz = d->s_dz, dc = d->s_dyt;
+        Mat dpnext = d->s_dynext, dvnext = d->s_dvnext, dctx = d->s_dhc, dxq = d->s_dx2;
+        mat_zero(dpnext); mat_zero(dvnext);
+        for (int s = steps - 1; s >= 0; --s) {
+            for (int i = 0; i < O; ++i)
+                dc.data[i] = dpreds.data[s * O + i] + dpnext.data[i] + dvnext.data[i];
+            mat_copy(d->fc2.xcache, d->ac[s]); linear_backward(&d->fc2, dc, da);
+            for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[s].data[i] > 0.0f) ? da.data[i] : 0.0f;
+            mat_copy(d->fc1.xcache, d->zc[s]); linear_backward(&d->fc1, dh1, dz);
+            for (int i = 0; i < H; ++i) dctx.data[i] = dz.data[i];       /* grad into context */
+            xattn_backward_step(&d->xattn, s, dctx, dxq);                /* dxq = [dp_x ; dv_x] */
+            for (int i = 0; i < O; ++i) {
+                float gs = dpreds.data[s * O + i];
+                float dp_old = dpnext.data[i], dv_old = dvnext.data[i];
+                float dp_net = dz.data[H + i], dv_net = dz.data[H + O + i];
+                dpnext.data[i] = gs + dp_old + dp_net + dxq.data[i];               /* dp_s */
+                dvnext.data[i] = gs + dp_old + dv_old + dv_net + dxq.data[O + i];  /* dv_s */
+            }
+        }
+        xattn_backward_memory(&d->xattn, d->s_dmem);   /* K/V grads -> encoder-sequence grad */
+        mat_zero(dhenc);                               /* pooled context unused in xattn mode */
+        return;
+    }
     if (d->use_gru) {
         /* Backward of the recurrent cv rollout. dp/dv threading is identical to
          * the cv MLP; the correction's grad flows fc_out -> hid_s, is combined
@@ -393,8 +479,9 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     memcpy(dhenc.data, d->s_dhacc.data, H * sizeof(float));
 }
 void decoder_free(Decoder *d) {
-    if (d->use_gru) { gru_free(&d->gru); linear_free(&d->fc_out); }
-    else            { linear_free(&d->fc1); linear_free(&d->fc2); }
+    if (d->use_gru)        { gru_free(&d->gru); linear_free(&d->fc_out); }
+    else                   { linear_free(&d->fc1); linear_free(&d->fc2); }
+    if (d->use_xattn)      { xattn_free(&d->xattn); mat_free(&d->s_xq); mat_free(&d->s_dmem); }
     for (int s = 0; s < d->max_steps; ++s) { mat_free(&d->zc[s]); mat_free(&d->h1c[s]); mat_free(&d->ac[s]); }
     free(d->zc); free(d->h1c); free(d->ac);
     mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn); mat_free(&d->s_v);
@@ -486,6 +573,7 @@ void model_set_seed_velocity(Model *m, const Mat v) {
 void model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev) {
     pgf_forward(&m->pgf, xnum, xtext, m->xtilde);
     encoder_forward(&m->enc, m->xtilde, m->henc);
+    if (m->dec.use_xattn) xattn_set_memory(&m->dec.xattn, m->enc.encseq);   /* memory = encoder seq */
     Mat ctx = m->henc;
     if (m->use_co) { cospatial_forward(&m->co, m->henc, m->nbr, m->nbr_cnt, m->henc2); ctx = m->henc2; }
     decoder_forward(&m->dec, ctx, yprev, m->vseed, m->cfg.pred_len, m->pred);
@@ -497,6 +585,7 @@ void model_backward(Model *m, const Mat dpred, const Mat dgate_pen) {
     } else {
         decoder_backward(&m->dec, dpred, m->dhenc);
     }
+    if (m->dec.use_xattn) mat_copy(m->enc.dencseq, m->dec.s_dmem);  /* route attended-memory grad */
     encoder_backward(&m->enc, m->dhenc, m->dxtilde);
     pgf_backward(&m->pgf, m->dxtilde, dgate_pen);
 }

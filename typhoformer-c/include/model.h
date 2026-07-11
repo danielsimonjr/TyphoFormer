@@ -55,6 +55,8 @@ typedef struct {
     TimeMix tmix;       /* pool in_len -> 1                */
     Mat     posenc, dposenc;                 /* learned positional encoding [in_len,D] */
     int     use_spatial, use_posenc, pool_last;
+    int     use_encseq;                      /* expose the pre-pool [in_len,D] sequence */
+    Mat     encseq, dencseq;                 /* pre-pool sequence + its injected grad (--xattn) */
     Mat     b0, b1, db0, db1, tmid, dtmid;   /* work buffers */
 } Encoder;
 Encoder encoder_new(const Config *c, ParamList *pl);
@@ -75,11 +77,13 @@ void model_set_pool_last(int on);    /* pool by taking the last step, not TimeMi
 typedef struct {
     Linear fc1, fc2;                    /* MLP correction (plain/delta/cv modes) */
     GRU    gru; Linear fc_out;          /* recurrent correction (--gru mode)     */
-    int    hidden, out, max_steps, use_cv, use_gru;
+    CrossAttn xattn;                    /* per-step encoder cross-attention (--xattn) */
+    int    hidden, out, max_steps, use_cv, use_gru, use_xattn;
     Mat   *zc, *h1c, *ac;               /* per-step caches (autoregressive rollout) */
     Mat    s_yt, s_a, s_ytn, s_v;       /* forward scratch (s_v: cv velocity) */
     Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dvnext, s_dhacc;  /* backward scratch */
     Mat    s_hid0, s_dhid, s_dhc, s_dx2;  /* gru scratch (initial hidden, hidden grads, dx) */
+    Mat    s_xq, s_dmem;                  /* xattn scratch (query input, memory grad) */
 } Decoder;
 Decoder decoder_new(const Config *c, ParamList *pl);
 /* vseed is the seed velocity (normalized coord units); used only in cv mode and
@@ -110,6 +114,12 @@ void    model_set_cv(int on);
  * multi-step rollout real memory. Implies --cv anchoring; fc_out zero-init so it
  * still starts at CLIPER. Set BEFORE model_new. Off by default. */
 void    model_set_gru(int on);
+
+/* Cross-attention decoder: each rollout step attends over the encoder's
+ * per-timestep sequence (not the pooled context) to build its own context,
+ * which feeds the curvature correction. Implies --cv anchoring (fc2 zero-init).
+ * Set BEFORE model_new. Off by default. */
+void    model_set_xattn(int on);
 
 /* ---- Co-active spatial cross-attention ------------------------------ */
 /* The encoded context attends over the relative states of storms active at the
