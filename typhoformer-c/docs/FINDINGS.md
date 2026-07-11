@@ -44,7 +44,23 @@ honest reading is that the text branch provides no *robust* benefit here — a
 proper study would repeat the ablation across many splits and, ideally, more
 data.)
 
-## 3. What this means
+## 3. More capacity does not fix it
+
+Scaling from the compact demo (198 K params) to the **full paper config**
+(`--full`, 5.1 M params — 26× larger), same split 42:
+
+| model | params | held-out test ΔR (km) | persistence |
+|:--|:--:|:--:|:--:|
+| compact, numbers-only | 198 K | 156.0 | 102.7 |
+| compact, with text | 198 K | 172.9 | 102.7 |
+| **full config, with text** | **5.1 M** | **158.0** | **102.7** |
+
+The full model lands between the compact variants and is still **~55 km worse
+than persistence** on this split. Adding 26× the parameters did not close the
+gap — the bottleneck is the **~98-storm dataset**, not model size. (Consistent
+with §1: 158 km sits inside the 95–206 km split-variance band.)
+
+## 4. What this means
 
 - The engineering is sound; the **forecaster is not a clear win over the trivial
   baseline** on this small sample, and the marquee "language helps" claim does
@@ -66,5 +82,6 @@ for s in 1 2 3 4 5; do ./typhoformer train 25 --patience=8 --split_seed=$s; done
 ```
 
 (See [LABS.md](LABS.md) Track D for these as guided exercises.) The full paper
-config (`--full`) and a km-aware loss are the natural next things to try; whether
-they change the verdict is, honestly, still an open question.
+config was tried (§3) and does not change the verdict. A km-aware loss and — most
+importantly — **more data** are the remaining levers; on ~98 storms, no amount of
+model capacity made this beat persistence.
