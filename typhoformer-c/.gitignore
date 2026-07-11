@@ -7,10 +7,12 @@ tests/test_model
 tests/test_data
 tests/test_golden
 tests/test_module
-tests/test_config
+tests/test_parallel
 tests/test_checkpoint
-tests/test_backend
+tests/test_npy
 typhoformer
+._test_*.tmp
+._test_*.tmp.npy
 *.bin
 *.out
 *.ckpt

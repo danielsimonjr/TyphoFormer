@@ -21,10 +21,11 @@ SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)
 
 TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data \
-           tests/test_golden tests/test_module tests/test_parallel
+           tests/test_golden tests/test_module tests/test_parallel \
+           tests/test_checkpoint tests/test_npy
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
-.PHONY: all lib test test-san clean
+.PHONY: all lib test test-san test-valgrind clean
 
 all: typhoformer
 
@@ -48,6 +49,11 @@ test: $(TESTS)
 test-san:
 	$(MAKE) clean
 	$(MAKE) SAN=1 test
+
+# Run every test under valgrind (memcheck). Requires valgrind installed.
+VALGRIND ?= valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite
+test-valgrind: $(TESTS)
+	@for t in $(TESTS); do echo "== valgrind $$t =="; $(VALGRIND) ./$$t || exit 1; done
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
