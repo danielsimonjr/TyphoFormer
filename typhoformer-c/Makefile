@@ -6,7 +6,7 @@ LDLIBS  := -lm
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)
 
-TESTS   := tests/test_tensor
+TESTS   := tests/test_tensor tests/test_nn
 BUILD   := $(filter-out src/main.o,$(OBJ))
 
 .PHONY: all test clean
@@ -14,7 +14,7 @@ BUILD   := $(filter-out src/main.o,$(OBJ))
 all: $(OBJ)
 
 # Unit tests link against the library objects (excluding main.o).
-tests/test_tensor: tests/test_tensor.c $(BUILD)
+tests/%: tests/%.c $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
 test: $(TESTS)
