@@ -311,6 +311,11 @@ void dataset_denorm(const Dataset *d, float *latlon) {
     latlon[1] = latlon[1] * d->cstd[1] + d->cmean[1];
 }
 
+/* Zero the text branch in place (numbers-only ablation). */
+static void maybe_drop_text(const Dataset *d, Mat xtext) {
+    if (d->no_text) memset(xtext.data, 0, (size_t)xtext.rows * xtext.cols * sizeof(float));
+}
+
 void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y) {
     if (d->prewindowed) {
         const int F = d->d_num + d->d_text;
@@ -328,6 +333,7 @@ void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y)
             Y.data[k * 2] = tg[k * 2]; Y.data[k * 2 + 1] = tg[k * 2 + 1];
             cnorm(d, &Y.data[k * 2], &Y.data[k * 2 + 1]);
         }
+        maybe_drop_text(d, xtext);
         return;
     }
     int r0 = d->start[s];
@@ -343,6 +349,7 @@ void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y)
         Y.data[k * 2 + 1] = d->lon[r0 + d->in_len + k];
         cnorm(d, &Y.data[k * 2], &Y.data[k * 2 + 1]);
     }
+    maybe_drop_text(d, xtext);
 }
 
 Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed) {

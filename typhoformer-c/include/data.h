@@ -32,6 +32,7 @@ typedef struct {
     int   *start;        /* n_samples window start record indices           */
     int    n_samples;
     int    prewindowed;  /* 1 => samples come from a .tfb file (below)       */
+    int    no_text;      /* 1 => dataset_get zeros the text branch (ablation)*/
     float *win_in;       /* n_samples * in_len * (d_num+d_text)             */
     float *win_tg;       /* n_samples * pred_len * 2                        */
     float *win_seed;     /* n_samples * 2: true decoder seed (TFB2) or NULL */

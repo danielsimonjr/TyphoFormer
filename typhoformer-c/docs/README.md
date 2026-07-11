@@ -15,7 +15,8 @@ renders everywhere including mobile.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | students | The model end to end, and the **full forward + backward math** for every layer (Linear, LayerNorm, softmax, attention, FFN, block, PGF, decoder, loss, Adam). Derivations match the code line for line. |
 | [THEORY_MAP.md](THEORY_MAP.md) | both | A one-page **theory ↔ code map**: every equation → the exact `file:function` that implements it (forward and backward), plus the extension seams. |
 | [GLOSSARY.md](GLOSSARY.md) | both | Plain-language **definitions** of every term (architecture, training, data, systems), each linked to where it lives in code. |
-| [LABS.md](LABS.md) | both | **Hands-on exercises** graded by an objective check (a gradient check passes / the golden loss is unchanged) — three tracks: understand, extend, deploy. |
+| [LABS.md](LABS.md) | both | **Hands-on exercises** graded by an objective check (a gradient check passes / the golden loss is unchanged) — four tracks: understand, extend, deploy, research. |
+| [FINDINGS.md](FINDINGS.md) | both | **Does it actually forecast?** The honest held-out results: split variance, the language-branch ablation, and why the model is ~parity with persistence. |
 | [API.md](API.md) | engineers | Complete public API reference and the **memory / ownership / lifetime model** — who allocates, who frees, what aliases, and what is thread-safe. |
 | [INTEGRATION.md](INTEGRATION.md) | engineers | Embedding the code as a **library** in your own C application: inference from a checkpoint, the on-disk file formats (byte-exact), error handling, threading, and performance. |
 | [EXTENDING.md](EXTENDING.md) | both | How to **add a new layer or op** with the gradient-check discipline, the pluggable Module interface, the compute-backend seam, and multicore training. |

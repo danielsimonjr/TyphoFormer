@@ -154,6 +154,43 @@ valgrind job is clean.
 
 ---
 
+## Track D — Researchers: does it actually work?
+
+These labs ask the *scientific* questions the codebase is instrumented to answer
+— the ones that matter more than "is it well-built."
+
+### Lab D1 — Does the language branch help? (ablation)
+**Goal:** test the paper's central premise — that GPT-4o/MiniLM text descriptions
+improve track forecasting — instead of assuming it.
+**Files:** `--no_text` flag (`src/data.c` `maybe_drop_text`).
+**Steps:** train two models with the same seed and split, one normal and one
+`--no_text` (numbers only). Compare the **held-out test** ΔR.
+```sh
+./typhoformer train 25 --patience=8 --split_seed=42            # with text
+./typhoformer train 25 --patience=8 --split_seed=42 --no_text  # numbers only
+```
+**Check:** report both test numbers. If `--no_text` matches or beats the full
+model, the language branch is not earning its keep on this data — a real, honest
+result. (See the README's "measured honestly" section for the current answer.)
+
+### Lab D2 — How much does the split matter? (variance)
+**Goal:** one train/val/test split is one sample; estimate the spread.
+**Files:** `--split_seed`.
+**Steps:** train with `--split_seed=1..5` and collect the held-out test ΔR.
+**Check:** report mean ± std. A large spread means the single-split headline
+number is not trustworthy on its own — quote the distribution, not one draw.
+
+### Lab D3 — Beat persistence for real
+**Goal:** the honest bar. On held-out storms the compact demo does **not** beat
+persistence; can you?
+**Steps:** try the full config (`--full`), a km-aware loss (weight longitude by
+`cos(lat)`), more/augmented data, or a stronger baseline comparison. Always score
+on the **test** set, never val.
+**Check:** held-out test ΔR below the persistence ΔR **reported on the same test
+storms** — and reproduced across several `--split_seed`s, not one lucky split.
+
+---
+
 ## The rule, restated
 
 Every lab ends at a **green check**, not "it looks right." The gradient checker,
