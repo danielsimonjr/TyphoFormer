@@ -31,7 +31,7 @@ or organization as appropriate.
 
 ```bash
 cd typhoformer-c
-make            # build the ./typhoformer training binary
+make            # build the ./typhoformer binary
 make test       # build and run all unit tests (gradient checks + data loader)
 
 ./typhoformer 30                     # 30 epochs, compact demo config, CSV data
@@ -40,6 +40,37 @@ make test       # build and run all unit tests (gradient checks + data loader)
 ```
 
 Requires only a C11 compiler (`gcc`/`clang`) and `make`.
+
+## Command-line tools
+
+The `./typhoformer` binary provides subcommands (the default is `train`, so
+`./typhoformer 30` still trains):
+
+| Command | Purpose | Example |
+|:--|:--|:--|
+| `train`   | Train; writes a checkpoint (with a config header). | `./typhoformer train 30 --full --save=m.ckpt` |
+| `eval`    | Load a checkpoint and evaluate (MAE + spherical-distance ΔR). | `./typhoformer eval --weights=m.ckpt` |
+| `prepare` | Build sliding-window samples from CSV + embeddings and write a `.tfb`. | `./typhoformer prepare --out=data.tfb` |
+
+Plus the offline preprocessing under `tools/` — these two stages need large
+external models (GPT-4o, MiniLM), so they are **Python by necessity** (the C
+core consumes their output, precomputed embeddings):
+
+| Tool | Purpose |
+|:--|:--|
+| `tools/gen_descriptions.py` | GPT-4o natural-language descriptions per record (needs `OPENAI_API_KEY`). |
+| `tools/gen_embeddings.py`   | MiniLM (`all-MiniLM-L6-v2`) 384-d embeddings → `emb_chunk_*.npy`. |
+| `tools/npy_dict_to_bin.py`  | Convert the pre-split pickled `data/{train,val,test}/*.npy` dicts → `.tfb`. |
+
+End-to-end pipeline (from raw records):
+
+```bash
+OPENAI_API_KEY=... python tools/gen_descriptions.py ../HURDAT_2new_3000.csv ../desc.csv
+python tools/gen_embeddings.py ../desc.csv ../embedding_chunks
+./typhoformer prepare --out=../data.tfb        # optional: cache windows
+./typhoformer train 30 --save=model.ckpt
+./typhoformer eval  --weights=model.ckpt
+```
 
 ### Consuming the repository's pre-split `.npy` data
 
