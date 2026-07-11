@@ -53,9 +53,9 @@ TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / 
 </p>
 
 **Algorithm 1** describes the end-to-end training recipe:
-- **Phase 1 — Language context (offline, cached).** For each record, GPT-4o produces a natural-language description (`generate_text_description_new.py`); a sentence encoder (`all-MiniLM-L6-v2`) turns it into token embeddings (`generate_text_embeddings.py`); the tokens are mean-pooled into a single prompt vector `p̄`.
-- **Phase 2 — Sliding windows.** Each trajectory is sliced into `(INPUT_LEN=L, PRED_LEN=H)` samples (`prepare_typhoformer_data.py`).
-- **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term that keeps the fusion gate from collapsing (`τ = 0.6`, `λ_g = 0.1` in `train_typhoformer.py`):
+- **Phase 1 — Language context (offline, cached).** For each record, GPT-4o produces a natural-language description (`legacy/generate_text_description_new.py`); a sentence encoder (`all-MiniLM-L6-v2`) turns it into token embeddings (`legacy/generate_text_embeddings.py`); the tokens are mean-pooled into a single prompt vector `p̄`.
+- **Phase 2 — Sliding windows.** Each trajectory is sliced into `(INPUT_LEN=L, PRED_LEN=H)` samples (`legacy/prepare_typhoformer_data.py`).
+- **Phase 3 — Optimization.** The model minimizes an MSE loss on the predicted `(lat, lon)` plus a gate-regularization term that keeps the fusion gate from collapsing (`τ = 0.6`, `λ_g = 0.1` in `legacy/train_typhoformer.py`):
 
 <p align="center">
   <picture>
@@ -73,10 +73,10 @@ TyphoFormer is a hybrid multi-modal Transformer for tropical-cyclone (typhoon / 
   </picture>
 </p>
 
-**Algorithm 2** details a single forward pass through the three model modules (`model/`):
-- **Prompt-aware Gating Fusion (PGF).** Computes a per-time-step sigmoid gate and blends the projected numerical and textual features (Eq. 1, shown below), letting the model modulate how much language context to trust at each step (`model/PGF_module.py`).
-- **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over `N_layers` blocks — the single-track setting uses `N = 1` node — producing a context vector `h_L` at the last step (`model/STTransformer.py`).
-- **Autoregressive decoder.** Rolls out `H` future coordinates, feeding each prediction back together with `h_L` (`TyphoDecoder` in `model/TyphoFormer.py`).
+**Algorithm 2** details a single forward pass through the three model modules (`legacy/model/`):
+- **Prompt-aware Gating Fusion (PGF).** Computes a per-time-step sigmoid gate and blends the projected numerical and textual features (Eq. 1, shown below), letting the model modulate how much language context to trust at each step (`legacy/model/PGF_module.py`).
+- **Spatio-temporal encoder.** Applies alternating temporal and spatial self-attention over `N_layers` blocks — the single-track setting uses `N = 1` node — producing a context vector `h_L` at the last step (`legacy/model/STTransformer.py`).
+- **Autoregressive decoder.** Rolls out `H` future coordinates, feeding each prediction back together with `h_L` (`TyphoDecoder` in `legacy/model/TyphoFormer.py`).
 
 <p align="center">
   <picture>
@@ -207,8 +207,8 @@ unzip -o "data/train/train_part*.zip" -d data/train
 unzip -o "data/test/test.zip"         -d data/test
 
 # 4. Train, then evaluate
-python train_typhoformer.py     # checkpoints saved under ./checkpoints
-python eval_typhoformer.py
+python legacy/train_typhoformer.py     # checkpoints saved under ./checkpoints
+python legacy/eval_typhoformer.py
 ```
 
 **Environment**
@@ -218,8 +218,8 @@ python eval_typhoformer.py
 | `torch` | ≥ 2.1.0 | model, training |
 | `numpy`, `pandas` | — | data handling |
 | `tqdm` | — | progress bars |
-| `scikit-learn` | — | train/val/test split (`prepare_typhoformer_data.py`) |
-| `torchinfo` | — | model summary (imported by `model/STTransformer.py`) |
+| `scikit-learn` | — | train/val/test split (`legacy/prepare_typhoformer_data.py`) |
+| `torchinfo` | — | model summary (imported by `legacy/model/STTransformer.py`) |
 | `sentence-transformers` | — | MiniLM text embeddings |
 | `transformers` | — | tokenizer / encoder backend |
 | `openai`, `backoff` | — | GPT-4o prompt generation (optional; only to regenerate text) |
@@ -247,10 +247,14 @@ See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, 
 
 ```bash
 TyphoFormer/
-├── model/
-│   ├── STTransformer.py       # Spatio-temporal Transformer backbone
-│   ├── PGF_module.py          # Prompt-aware Gating Fusion module
-│   └── TyphoFormer.py         # Full model (PGF + encoder + AR decoder)
+├── typhoformer-c/             # Dependency-free pure-C reimplementation (MIT)
+│   ├── src/ include/ tests/   # tensor core, NN layers, model, data, training
+│   ├── tools/                 # .npy-dict → .tfb data converter
+│   └── Makefile               # `make test` / `make && ./typhoformer`
+│
+├── legacy/                    # Original PyTorch implementation (see legacy/README.md)
+│   ├── model/                 # PGF, ST-Transformer, full model
+│   └── *.py                   # training, eval, data prep, text/embedding generation
 │
 ├── data/                      # Processed typhoon datasets (.npy)
 │   ├── train/                 # train_part1.zip + train_part2.zip → unzip here
@@ -262,27 +266,17 @@ TyphoFormer/
 │   └── ... emb_chunk_006.npy
 │
 ├── assets/                    # Figures (results, algorithm diagrams, demo GIF)
-├── typhoformer-c/             # Dependency-free pure-C reimplementation (MIT)
-│   ├── src/ include/ tests/   # tensor core, NN layers, model, data, training
-│   ├── tools/                 # .npy-dict → .tfb data converter
-│   └── Makefile               # `make test` / `make && ./typhoformer`
 ├── HURDAT_2new_3000.csv       # Raw typhoon records (2020–2024 sample)
-├── generate_text_description_new.py   # GPT-4o language-description generation
-├── generate_text_embeddings.py        # MiniLM (all-MiniLM-L6-v2) embedding generation
-├── prepare_typhoformer_data.py        # Dataset preparation (sliding windows)
-├── train_typhoformer.py               # Training entry point
-├── eval_typhoformer.py                # Evaluation script
-├── TyphoFormer_algorithm.tex          # Paper-style pseudocode (LaTeX)
-└── utils.py
+└── TyphoFormer_algorithm.tex  # Paper-style pseudocode (LaTeX)
 ```
 
 ## 🧩 Data Preparation
 
 The bundled data is ready to use; follow these steps only to regenerate from raw records or bring your own.
 
-1. **Generate descriptions** — run `generate_text_description_new.py` to create GPT-4o natural-language descriptions for each typhoon record. *(Pre-generated descriptions are already provided.)*
-2. **Embed text** — convert the descriptions to embeddings with `generate_text_embeddings.py` (model: `all-MiniLM-L6-v2`, 384-dim).
-3. **Build dataset** — combine numerical and textual embeddings into ready-to-use samples with `prepare_typhoformer_data.py`.
+1. **Generate descriptions** — run `legacy/generate_text_description_new.py` to create GPT-4o natural-language descriptions for each typhoon record. *(Pre-generated descriptions are already provided.)*
+2. **Embed text** — convert the descriptions to embeddings with `legacy/generate_text_embeddings.py` (model: `all-MiniLM-L6-v2`, 384-dim).
+3. **Build dataset** — combine numerical and textual embeddings into ready-to-use samples with `legacy/prepare_typhoformer_data.py`.
 4. **Output** — the final dataset is written to `data/{train,val,test}/*.npy`.
 
 Each `.npy` file holds one sliding-window sample:
@@ -293,7 +287,7 @@ X = data["input"]    # (INPUT_LEN, D_NUM + D_TEXT) numerical + language features
 Y = data["target"]   # (PRED_LEN, 2) future (lat, lon)
 ```
 
-> **❗️ Note.** This repo ships 5 years of HURDAT2 ground-truth records (`HURDAT_2new_3000.csv`, 2020–2024) with the matching GPT-4o descriptions and MiniLM embeddings, as an example. The results in the paper use **20+ years** of records. To generate your own descriptions, set a valid OpenAI API key in `generate_text_description_new.py`.
+> **❗️ Note.** This repo ships 5 years of HURDAT2 ground-truth records (`HURDAT_2new_3000.csv`, 2020–2024) with the matching GPT-4o descriptions and MiniLM embeddings, as an example. The results in the paper use **20+ years** of records. To generate your own descriptions, set a valid OpenAI API key in `legacy/generate_text_description_new.py`.
 
 <p align="center">
   <img src="assets/test_code_visualization.gif" alt="TyphoFormer training/evaluation demo" width="800">
@@ -301,7 +295,7 @@ Y = data["target"]   # (PRED_LEN, 2) future (lat, lon)
 
 ## 🔧 Configuration
 
-Training and model hyperparameters can be adjusted at the top of `train_typhoformer.py`:
+Training and model hyperparameters can be adjusted at the top of `legacy/train_typhoformer.py`:
 
 ```python
 # <Adjustable Configurations>
