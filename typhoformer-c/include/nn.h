@@ -13,6 +13,17 @@
 void  nn_seed(unsigned long s);
 float nn_uniform(float lo, float hi);
 
+/* ---- dropout mode (train vs eval) ----------------------------------- */
+/* Dropout is active only when training is on AND the rate is > 0. Eval /
+ * inference / gradient-checks leave training off (the default), so dropout is
+ * the identity and everything stays deterministic. The dropout RNG is
+ * thread-local (seed it per worker) so multicore training is race-free. */
+void nn_set_training(int on);
+void nn_set_dropout(float p);
+void nn_dropout_seed(unsigned long s);
+unsigned long nn_dropout_state(void);   /* current thread's dropout RNG (to thread it across workers) */
+int  nn_training(void);
+
 /* ---- parameter registry --------------------------------------------- */
 typedef struct { float *v; float *g; int n; const char *name; } Param;
 typedef struct { Param *item; int count, cap; } ParamList;
@@ -88,7 +99,8 @@ typedef struct {
     FFN       ff;
     int       d;
     Mat       attn_out, r1, y1, ff_out, r2;   /* caches */
-    Mat       s_dr2, s_dy1, s_dr1, s_dtmp;     /* backward scratch [S,D] */
+    Mat       drop1, drop2;                    /* dropout masks (attn / ffn) */
+    Mat       s_dr2, s_dy1, s_dr1, s_dtmp, s_dd; /* backward scratch [S,D] */
 } Block;
 
 Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *pl, const char *name);

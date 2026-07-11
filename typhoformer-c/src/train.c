@@ -40,6 +40,7 @@ typedef struct {
 } Eval;
 
 static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
+    nn_set_training(0);                              /* dropout off for evaluation */
     int H = d->pred_len < MAXH ? d->pred_len : MAXH;
     Mat xn = mat_new(d->in_len, d->d_num), xt = mat_new(d->in_len, d->d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(d->pred_len, 2);
@@ -91,7 +92,7 @@ static Dataset load_source(const char *bin, const char *csv, const char *emb, in
 static int cmd_train(int argc, char **argv) {
     int epochs = 10, full = 0, batch = 8, threads = 1;
     int pred_len = -1, d_model = -1, d_ff = -1, n_layers = -1, n_heads = -1, in_len = -1;
-    float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f;
+    float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f, dropout = 0.1f;
     int patience = 0;                 /* 0 = disabled (early stopping) */
     unsigned long seed = 20260711;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT;
@@ -113,11 +114,14 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--wd=", 5))        wd = (float)atof(argv[i] + 5);
         else if (!strncmp(argv[i], "--lambda=", 9))    lambda = (float)atof(argv[i] + 9);
         else if (!strncmp(argv[i], "--lr_decay=", 11)) lr_decay = (float)atof(argv[i] + 11);
+        else if (!strncmp(argv[i], "--dropout=", 10))  dropout = (float)atof(argv[i] + 10);
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') epochs = atoi(argv[i]);
     }
     nn_seed(seed);
+    nn_set_dropout(dropout);
+    nn_dropout_seed(seed ^ 0xD4090CULL);
     Config c = config_default();
     if (!full) { c.d_model = 64; c.d_ff = 128; c.n_layers = 2; }
     if (d_model  > 0) c.d_model  = d_model;
@@ -159,6 +163,7 @@ static int cmd_train(int argc, char **argv) {
         for (int i = ntr - 1; i > 0; --i) { int j = (int)(nn_uniform(0, 1) * (i + 1)); if (j > i) j = i;
             int t = train[i]; train[i] = train[j]; train[j] = t; }
         double run_loss = 0.0; int nb = 0;
+        nn_set_training(1);                          /* dropout on for training */
         for (int b = 0; b < ntr; b += batch) {
             int bs = (b + batch <= ntr) ? batch : (ntr - b);
             if (pt) {                                /* data-parallel across cores */

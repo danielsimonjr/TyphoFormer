@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define GOLDEN_LOSS   0.03013   /* loss is now on normalized coordinates */
+#define GOLDEN_LOSS   0.02723   /* normalized coords + PyTorch bias init + T/S alternation */
 #define GOLDEN_TOL    1e-4
 
 int main(void) {

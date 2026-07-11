@@ -20,6 +20,31 @@ float nn_uniform(float lo, float hi) {
     return (float)(lo + (hi - lo) * u);
 }
 
+/* ---- dropout mode + thread-local dropout RNG ------------------------ */
+static int   g_training = 0;
+static float g_dropout  = 0.1f;
+static _Thread_local unsigned long g_drng = 88172645463325252UL;
+void nn_set_training(int on) { g_training = on; }
+void nn_set_dropout(float p) { g_dropout = p; }
+void nn_dropout_seed(unsigned long s) { g_drng = s ? s : 1UL; }
+unsigned long nn_dropout_state(void) { return g_drng; }
+int  nn_training(void) { return g_training; }
+static float drop_uniform(void) {
+    g_drng ^= g_drng << 13; g_drng ^= g_drng >> 7; g_drng ^= g_drng << 17;
+    return (float)((double)(g_drng >> 11) / 9007199254740992.0);
+}
+/* Fill mask with 0 (drop) / 1/(1-p) (keep) and apply it to m in place. */
+static void dropout_apply(Mat m, Mat mask, float p) {
+    float scale = 1.0f / (1.0f - p);
+    int n = m.rows * m.cols;
+    for (int i = 0; i < n; ++i) {
+        float keep = (drop_uniform() >= p) ? scale : 0.0f;
+        mask.data[i] = keep;
+        m.data[i] *= keep;
+    }
+}
+static int dropout_on(void) { return g_training && g_dropout > 0.0f; }
+
 /* ---- ParamList ------------------------------------------------------- */
 void plist_init(ParamList *pl) { pl->item = NULL; pl->count = pl->cap = 0; }
 void plist_add(ParamList *pl, float *v, float *g, int n, const char *name) {
@@ -54,8 +79,9 @@ Linear linear_new(int in, int out, ParamList *pl, const char *name) {
     l.b = (float *)calloc(out, sizeof(float));
     l.db = (float *)calloc(out, sizeof(float));
     l.xcache = (Mat){0, 0, NULL};
-    float k = 1.0f / sqrtf((float)in);           /* Xavier-ish uniform */
+    float k = 1.0f / sqrtf((float)in);           /* PyTorch nn.Linear default */
     for (int i = 0; i < out * in; ++i) l.W.data[i] = nn_uniform(-k, k);
+    for (int i = 0; i < out; ++i)      l.b[i]      = nn_uniform(-k, k);  /* bias U(-1/√in,·) */
     plist_add(pl, l.W.data, l.dW.data, out * in, name);
     plist_add(pl, l.b, l.db, out, name);
     return l;
@@ -314,34 +340,46 @@ Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *
     b.ff = ffn_new(d_model, ff_dim, pl, name);
     b.attn_out = (Mat){0,0,NULL}; b.r1 = (Mat){0,0,NULL}; b.y1 = (Mat){0,0,NULL};
     b.ff_out = (Mat){0,0,NULL}; b.r2 = (Mat){0,0,NULL};
+    b.drop1 = (Mat){0,0,NULL}; b.drop2 = (Mat){0,0,NULL};
     b.s_dr2 = (Mat){0,0,NULL}; b.s_dy1 = (Mat){0,0,NULL};
-    b.s_dr1 = (Mat){0,0,NULL}; b.s_dtmp = (Mat){0,0,NULL};
+    b.s_dr1 = (Mat){0,0,NULL}; b.s_dtmp = (Mat){0,0,NULL}; b.s_dd = (Mat){0,0,NULL};
     return b;
 }
 void block_forward(Block *b, const Mat x, Mat y) {
     const int S = x.rows, D = b->d;
     ensure(&b->attn_out, S, D); ensure(&b->r1, S, D); ensure(&b->y1, S, D);
     ensure(&b->ff_out, S, D); ensure(&b->r2, S, D);
+    int drop = dropout_on();
+    if (drop) { ensure(&b->drop1, S, D); ensure(&b->drop2, S, D); }
     mha_forward(&b->attn, x, b->attn_out);
+    if (drop) dropout_apply(b->attn_out, b->drop1, g_dropout);   /* post-attn dropout */
     for (int i = 0; i < S * D; ++i) b->r1.data[i] = x.data[i] + b->attn_out.data[i];
     layernorm_forward(&b->ln1, b->r1, b->y1);
     ffn_forward(&b->ff, b->y1, b->ff_out);
+    if (drop) dropout_apply(b->ff_out, b->drop2, g_dropout);     /* post-FFN dropout */
     for (int i = 0; i < S * D; ++i) b->r2.data[i] = b->y1.data[i] + b->ff_out.data[i];
     layernorm_forward(&b->ln2, b->r2, y);
 }
 void block_backward(Block *b, const Mat dy, Mat dx) {
     const int S = dy.rows, D = b->d;
-    ensure(&b->s_dr2, S, D); ensure(&b->s_dy1, S, D); ensure(&b->s_dr1, S, D); ensure(&b->s_dtmp, S, D);
-    Mat dr2 = b->s_dr2, dy1 = b->s_dy1, dr1 = b->s_dr1, dtmp = b->s_dtmp;
+    ensure(&b->s_dr2, S, D); ensure(&b->s_dy1, S, D); ensure(&b->s_dr1, S, D);
+    ensure(&b->s_dtmp, S, D); ensure(&b->s_dd, S, D);
+    Mat dr2 = b->s_dr2, dy1 = b->s_dy1, dr1 = b->s_dr1, dtmp = b->s_dtmp, dd = b->s_dd;
+    int drop = dropout_on();
     layernorm_backward(&b->ln2, dy, dr2);            /* y = LN2(r2) */
-    ffn_backward(&b->ff, dr2, dy1);                  /* r2 = y1 + ff(y1) */
-    for (int i = 0; i < S * D; ++i) dy1.data[i] += dr2.data[i];
+    if (drop) { for (int i = 0; i < S * D; ++i) dd.data[i] = dr2.data[i] * b->drop2.data[i];
+                ffn_backward(&b->ff, dd, dy1); }     /* r2 = y1 + dropout(ff(y1)) */
+    else        ffn_backward(&b->ff, dr2, dy1);
+    for (int i = 0; i < S * D; ++i) dy1.data[i] += dr2.data[i];   /* residual (unscaled) */
     layernorm_backward(&b->ln1, dy1, dr1);           /* y1 = LN1(r1) */
-    mha_backward(&b->attn, dr1, dtmp);               /* r1 = x + attn(x) */
+    if (drop) { for (int i = 0; i < S * D; ++i) dd.data[i] = dr1.data[i] * b->drop1.data[i];
+                mha_backward(&b->attn, dd, dtmp); }   /* r1 = x + dropout(attn(x)) */
+    else        mha_backward(&b->attn, dr1, dtmp);
     for (int i = 0; i < S * D; ++i) dx.data[i] = dr1.data[i] + dtmp.data[i];
 }
 void block_free(Block *b) {
     mha_free(&b->attn); layernorm_free(&b->ln1); layernorm_free(&b->ln2); ffn_free(&b->ff);
     mat_free(&b->attn_out); mat_free(&b->r1); mat_free(&b->y1); mat_free(&b->ff_out); mat_free(&b->r2);
-    mat_free(&b->s_dr2); mat_free(&b->s_dy1); mat_free(&b->s_dr1); mat_free(&b->s_dtmp);
+    mat_free(&b->drop1); mat_free(&b->drop2);
+    mat_free(&b->s_dr2); mat_free(&b->s_dy1); mat_free(&b->s_dr1); mat_free(&b->s_dtmp); mat_free(&b->s_dd);
 }
