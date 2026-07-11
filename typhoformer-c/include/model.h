@@ -51,14 +51,25 @@ typedef struct {
     Config  cfg;
     Linear  input_proj, output_proj;
     Block  *temporal;   /* n_layers, attention over time  */
-    Block  *spatial;    /* n_layers, single-node attention */
+    Block  *spatial;    /* n_layers, single-node attention (omitted if !use_spatial) */
     TimeMix tmix;       /* pool in_len -> 1                */
+    Mat     posenc, dposenc;                 /* learned positional encoding [in_len,D] */
+    int     use_spatial, use_posenc, pool_last;
     Mat     b0, b1, db0, db1, tmid, dtmid;   /* work buffers */
 } Encoder;
 Encoder encoder_new(const Config *c, ParamList *pl);
 void    encoder_forward(Encoder *e, const Mat xtilde, Mat henc);  /* henc [1,d_model] */
 void    encoder_backward(Encoder *e, const Mat dhenc, Mat dxtilde);
 void    encoder_free(Encoder *e);
+
+/* ---- Encoder architecture options (set BEFORE model_new) ------------ */
+/* Each is off by default so the golden path and existing tests are unchanged.
+ * They change the parameter set/order, so a checkpoint must be evaluated with
+ * the same options (the size-mismatch guard in checkpoint_load_params catches
+ * a mismatch). */
+void model_set_no_spatial(int on);   /* drop the degenerate N=1 spatial blocks */
+void model_set_posenc(int on);       /* add a learned positional encoding      */
+void model_set_pool_last(int on);    /* pool by taking the last step, not TimeMix */
 
 /* ---- Autoregressive decoder ----------------------------------------- */
 typedef struct {

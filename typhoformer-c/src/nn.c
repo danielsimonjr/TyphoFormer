@@ -45,6 +45,10 @@ static void dropout_apply(Mat m, Mat mask, float p) {
 }
 static int dropout_on(void) { return g_training && g_dropout > 0.0f; }
 
+/* ---- pre-norm vs post-norm block ------------------------------------ */
+static int g_prenorm = 0;
+void nn_set_prenorm(int on) { g_prenorm = on; }
+
 /* ---- ParamList ------------------------------------------------------- */
 void plist_init(ParamList *pl) { pl->item = NULL; pl->count = pl->cap = 0; }
 void plist_add(ParamList *pl, float *v, float *g, int n, const char *name) {
@@ -363,6 +367,18 @@ void block_forward(Block *b, const Mat x, Mat y) {
     ensure(&b->ff_out, S, D); ensure(&b->r2, S, D);
     int drop = dropout_on();
     if (drop) { ensure(&b->drop1, S, D); ensure(&b->drop2, S, D); }
+    if (g_prenorm) {
+        /* pre-norm: y1 = x + Drop(MHA(LN1(x))); y = y1 + Drop(FFN(LN2(y1))) */
+        layernorm_forward(&b->ln1, x, b->r1);                    /* r1 = LN1(x) */
+        mha_forward(&b->attn, b->r1, b->attn_out);
+        if (drop) dropout_apply(b->attn_out, b->drop1, g_dropout);
+        for (int i = 0; i < S * D; ++i) b->y1.data[i] = x.data[i] + b->attn_out.data[i];
+        layernorm_forward(&b->ln2, b->y1, b->r2);                /* r2 = LN2(y1) */
+        ffn_forward(&b->ff, b->r2, b->ff_out);
+        if (drop) dropout_apply(b->ff_out, b->drop2, g_dropout);
+        for (int i = 0; i < S * D; ++i) y.data[i] = b->y1.data[i] + b->ff_out.data[i];
+        return;
+    }
     mha_forward(&b->attn, x, b->attn_out);
     if (drop) dropout_apply(b->attn_out, b->drop1, g_dropout);   /* post-attn dropout */
     for (int i = 0; i < S * D; ++i) b->r1.data[i] = x.data[i] + b->attn_out.data[i];
@@ -378,6 +394,20 @@ void block_backward(Block *b, const Mat dy, Mat dx) {
     ensure(&b->s_dtmp, S, D); ensure(&b->s_dd, S, D);
     Mat dr2 = b->s_dr2, dy1 = b->s_dy1, dr1 = b->s_dr1, dtmp = b->s_dtmp, dd = b->s_dd;
     int drop = dropout_on();
+    if (g_prenorm) {
+        /* reverse of the pre-norm forward above */
+        if (drop) { for (int i = 0; i < S * D; ++i) dd.data[i] = dy.data[i] * b->drop2.data[i];
+                    ffn_backward(&b->ff, dd, dr2); }             /* dr2 = d(n2) */
+        else        ffn_backward(&b->ff, dy, dr2);
+        layernorm_backward(&b->ln2, dr2, dtmp);                  /* dtmp = d(y1) via LN2 */
+        for (int i = 0; i < S * D; ++i) dy1.data[i] = dy.data[i] + dtmp.data[i];   /* + residual */
+        if (drop) { for (int i = 0; i < S * D; ++i) dd.data[i] = dy1.data[i] * b->drop1.data[i];
+                    mha_backward(&b->attn, dd, dr1); }           /* dr1 = d(n1) */
+        else        mha_backward(&b->attn, dy1, dr1);
+        layernorm_backward(&b->ln1, dr1, dtmp);                  /* dtmp = d(x) via LN1 */
+        for (int i = 0; i < S * D; ++i) dx.data[i] = dy1.data[i] + dtmp.data[i];   /* + residual */
+        return;
+    }
     layernorm_backward(&b->ln2, dy, dr2);            /* y = LN2(r2) */
     if (drop) { for (int i = 0; i < S * D; ++i) dd.data[i] = dr2.data[i] * b->drop2.data[i];
                 ffn_backward(&b->ff, dd, dy1); }     /* r2 = y1 + dropout(ff(y1)) */
