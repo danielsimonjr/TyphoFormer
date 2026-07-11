@@ -99,6 +99,8 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
 | `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Serial path only (`--threads=1`); supersedes `--delta`. | off |
+| `--gru` | Constant-velocity decoder whose curvature correction is produced by a **GRU** with hidden state carried across the rollout (initialised from the encoder context) — gives the multi-step rollout real memory. Serial path only. | off |
+| `--xattn` | Constant-velocity decoder whose per-step context comes from **cross-attention over the encoder's full sequence** (not the pooled vector). Serial path only. | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
 | `--no_spatial` | Drop the degenerate N=1 spatial encoder blocks (their Q/K never train). | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
@@ -262,8 +264,13 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 |:--|:--:|:--:|
 | default (intensity + text) | 128.5 ± 41.3 km | ~parity |
 | **`--motion`** (feed position + velocity) | 79.0 ± 26.8 km | beats it |
-| **`--motion --delta`** (predict displacement) | **48.1 ± 2.7 km** | **2.5× better** |
+| **`--motion --delta`** (predict displacement) | 48.1 ± 2.7 km | 2.5× better |
 | `--motion --delta --no_text` (numbers only) | 46.5 ± 3.9 km | 2.6× better |
+| **`--motion --cv`** (constant-velocity decoder) | **40.5 km** | **reaches CLIPER (~39 km)** |
+
+`--cv` anchors the decoder at constant-velocity extrapolation and learns only the
+curvature — the first architectural change that reaches the constant-velocity
+baseline the model had been trailing (see [FINDINGS §9](docs/FINDINGS.md)).
 
 The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
 default model was **blind to motion** (its inputs are intensity + text; position

@@ -181,7 +181,49 @@ co-active storms) are attended over. The value of building `--co_spatial`
 properly was the measurement — and catching a real training divergence that a
 single-split run would have hidden.
 
-## 9. What this means
+## 9. The decoder: anchoring at constant velocity finally reaches CLIPER
+
+Everything above says the *inputs* and the *parametrization* are the levers, not
+the network internals. The decoder is where that pays off again. `--delta`
+anchored the rollout at **persistence** (`ŷ_t = y_{t-1} + Δ`) and learned the
+correction down to ~48 km. But the bar we actually chase is **constant-velocity
+(CLIPER, 39.4 km at 6h)** — and persistence is a needlessly bad place to start
+from when the seed velocity is right there in the data.
+
+`--cv` is a second-order delta: it threads a velocity state through the rollout
+and anchors at constant-velocity extrapolation,
+
+```
+ŷ_t = y_{t-1} + v + fc2(relu(fc1([h ; y_{t-1} ; v]))),   v ← v + correction
+```
+
+with `fc2` zero-initialised so the *untrained* model emits exact constant-velocity
+— it starts at CLIPER and learns only the curvature on top. (Verified directly:
+epoch-0 held-out ΔR is **39.4 km** with `--cv` vs **137 km** with `--delta`.)
+
+Held-out test ΔR (km), fixed `--motion` model, three storm-split seeds:
+
+| decoder | seed 1 | seed 3 | seed 5 | mean |
+|:--|:--:|:--:|:--:|:--:|
+| `--delta` (anchor at persistence) | 47.2 | 51.9 | 50.6 | 49.9 |
+| `--cv` (anchor at constant-velocity) | 42.2 | 41.3 | **37.9** | **40.5** |
+| *constant-velocity / CLIPER baseline* | — | — | — | *39.4* |
+
+This is the first **architectural** change in the whole exercise that moves the
+needle: **49.9 → 40.5 km (~19%), consistently on every split** (each `--cv` split
+beats its `--delta` counterpart), landing essentially *on* CLIPER — and on seed 5
+a hair *under* it (37.9 vs 39.4). The learned model has finally caught the
+constant-velocity forecaster it was losing to.
+
+It has not decisively *passed* CLIPER, and at a single horizon (6h) it arguably
+shouldn't be expected to — constant-velocity is very strong for one step. The
+place a learned curvature term should actually win is **longer horizons**, where
+storms recurve and constant-velocity drifts; that (with more than 98 storms) is
+the honest next test. But the lesson is clean and consistent with §5: give the
+decoder the right physical anchor — motion in, velocity threaded, correction
+learned from zero — and it matches the classical baseline instead of trailing it.
+
+## 10. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
@@ -192,26 +234,32 @@ single-split run would have hidden.
   Whether it would on a larger, harder dataset (rapid intensification, recurvature,
   extratropical transition — where text might carry signal the numbers don't) is
   the honest open question.
-- Remaining gap to constant-velocity (~48 vs ~39): a km-aware loss (`--km_loss`,
-  which down-weights longitude error by cos²(lat)) was **tested and did not help**
-  — it was slightly *worse* on the splits tried, so coordinate normalization
-  already balances the axes well enough. The more promising levers are longer
-  horizons (where curvature should let a learned model finally pass
-  constant-velocity) and — the ceiling on everything — **more than 98 storms**.
-- **The architecture is not the lever** (§7, §8). An encoder sweep (no_spatial /
+- **The gap to constant-velocity is now closed** (§9). `--cv` anchors the decoder
+  at constant-velocity instead of persistence and learns only the curvature:
+  49.9 → **40.5 km**, matching the 39.4 km CLIPER baseline (and beating it on one
+  split). The right *parametrization* — like motion in the inputs — is a real
+  lever; a km-aware loss (`--km_loss`) by contrast was **tested and did not help**.
+  The remaining frontier is **longer horizons** (where curvature should let the
+  learned model finally *pass* constant-velocity) and — the ceiling on everything
+  — **more than 98 storms**.
+- **The network internals are not the lever** (§7, §8). An encoder sweep (no_spatial /
   posenc / pool=last / prenorm) and two attention upgrades — a temporal
   distance bias (`--timebias`) and *real* multi-node spatial attention over
   co-active storms (`--co_spatial`) — are all neutral within split noise on the
   fixed model. Each is the architecturally right thing to do; none moves ΔR on
   this data. Building `--co_spatial` properly still paid off: it surfaced (and
   we fixed, via a zero-init residual) a real training divergence that a
-  single-split run would have hidden.
+  single-split run would have hidden. The levers that *did* move ΔR were all about
+  the physics the model sees — motion features, a displacement head, a
+  constant-velocity anchor — not the depth or attention of the network.
 
 ## Reproduce
 
 ```sh
 # the fix, across splits
 for s in 1 2 3 4 5; do ./typhoformer train 30 --patience=8 --motion --delta --split_seed=$s; done
+# the constant-velocity decoder — reaches CLIPER (§9)
+for s in 1 3 5; do ./typhoformer train 30 --patience=8 --motion --cv --threads=1 --split_seed=$s; done
 # does text help the fixed model?
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42            # with text
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42 --no_text  # numbers only

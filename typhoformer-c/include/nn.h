@@ -88,6 +88,43 @@ void ffn_forward(FFN *ff, const Mat x, Mat y);
 void ffn_backward(FFN *ff, const Mat dy, Mat dx);
 void ffn_free(FFN *ff);
 
+/* ---- GRU cell:  h_t = GRU(x_t, h_{t-1}) ----------------------------- */
+/* Gated recurrent unit, built from three Linear gates (reset/update/candidate):
+ *   r = σ(Lr[x;h]),  u = σ(Lu[x;h]),  n = tanh(Ln[x; r⊙h]),  h' = (1-u)⊙n + u⊙h
+ * Per-step forward state is cached in arrays sized to max_steps so the
+ * autoregressive rollout can back-propagate through the whole sequence. */
+typedef struct {
+    int    in, hid, max_steps;
+    Linear lr, lu, ln;                       /* reset, update, candidate gates */
+    Mat   *zruc, *znc, *rc, *uc, *nc, *hpc;  /* per-step caches [1,·]          */
+    Mat    s_dzru, s_dzn, s_dg;              /* backward scratch               */
+} GRU;
+GRU  gru_new(int in, int hid, int max_steps, ParamList *pl, const char *name);
+void gru_forward(GRU *g, int step, const Mat x, const Mat hprev, Mat hout);
+/* Accumulates gate grads; writes dx and dhprev (either may be a NULL matrix). */
+void gru_backward(GRU *g, int step, const Mat dh, Mat dx, Mat dhprev);
+void gru_free(GRU *g);
+
+/* ---- Single-head cross-attention (query -> fixed memory) ------------ */
+/* Scaled dot-product attention of a per-step query over a FIXED memory sequence
+ * (e.g. the encoder's per-timestep states). K/V are projected from the memory
+ * once (shared across steps); each step supplies its own query. Per-step caches
+ * let an autoregressive rollout back-propagate through every step, and the K/V
+ * gradients accumulate across steps then flow back to the memory in one pass. */
+typedef struct {
+    int    qin, d, max_steps, T;
+    Linear lq, lk, lv, lo;              /* query / key / value / output proj */
+    Mat    K, V, memc;                  /* per-forward memory caches [T,d]   */
+    Mat   *qc, *ac, *cxc, *xc;          /* per-step: q[1,d] a[1,T] ctx[1,d] x[1,qin] */
+    Mat    s_dctx, s_da, s_dsc, s_dq, s_dK, s_dV;  /* backward scratch        */
+} CrossAttn;
+CrossAttn xattn_new(int qin, int d, int max_steps, ParamList *pl, const char *name);
+void xattn_set_memory(CrossAttn *a, const Mat mem);          /* project K,V (T = mem.rows) */
+void xattn_forward(CrossAttn *a, int step, const Mat x, Mat out);      /* out[1,d] */
+void xattn_backward_step(CrossAttn *a, int step, const Mat dout, Mat dx);  /* dx[1,qin]; accum dK,dV */
+void xattn_backward_memory(CrossAttn *a, Mat dmem);          /* dK,dV -> dmem[T,d] (after all steps) */
+void xattn_free(CrossAttn *a);
+
 /* ---- Multi-head self-attention over a sequence [S,D] ---------------- */
 typedef struct {
     int    d_model, n_heads, head_dim;
