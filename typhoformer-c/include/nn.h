@@ -65,13 +65,15 @@ void ffn_free(FFN *ff);
 /* ---- Multi-head self-attention over a sequence [S,D] ---------------- */
 typedef struct {
     int    d_model, n_heads, head_dim;
+    int    self_only;       /* 1 => each position attends only to itself
+                             *      (spatial attention with a single node) */
     Linear q, k, v, o;
     Mat    Q, K, V, Ocat;   /* [S,D] caches */
     Mat   *P;               /* n_heads x [S,S] attention weights */
     int    Scap;
 } MHA;
 
-MHA  mha_new(int d_model, int n_heads, ParamList *pl, const char *name);
+MHA  mha_new(int d_model, int n_heads, int self_only, ParamList *pl, const char *name);
 void mha_forward(MHA *m, const Mat x, Mat y);        /* self-attn over rows of x */
 void mha_backward(MHA *m, const Mat dy, Mat dx);
 void mha_free(MHA *m);
@@ -85,7 +87,7 @@ typedef struct {
     Mat       attn_out, r1, y1, ff_out, r2;   /* caches */
 } Block;
 
-Block block_new(int d_model, int n_heads, int ff_dim, ParamList *pl, const char *name);
+Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *pl, const char *name);
 void  block_forward(Block *b, const Mat x, Mat y);
 void  block_backward(Block *b, const Mat dy, Mat dx);
 void  block_free(Block *b);

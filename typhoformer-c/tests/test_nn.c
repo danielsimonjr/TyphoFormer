@@ -29,10 +29,10 @@ static double loss_only(void) {
     return L;
 }
 
-int main(void) {
-    nn_seed(20260711);
+static int check_block(int self_only) {
+    printf("[block gradient check, self_only=%d]\n", self_only);
     plist_init(&pl);
-    blk = block_new(D, HEADS, FF, &pl, "block");
+    blk = block_new(D, HEADS, FF, self_only, &pl, "block");
 
     gx = mat_new(S, D); gt = mat_new(S, D);
     for (int i = 0; i < S * D; ++i) { gx.data[i] = nn_uniform(-1, 1); gt.data[i] = nn_uniform(-1, 1); }
@@ -86,11 +86,20 @@ int main(void) {
     /* Pass if either the robust relative error is small, or the absolute
      * error is at the finite-difference noise floor for float. */
     int fail = 0;
-    if (max_err >= 2e-2f && max_abs >= 1e-3f)       { printf("FAIL: parameter gradients\n"); fail = 1; }
-    if (max_dx_err >= 2e-2f && max_dx_abs >= 1e-3f) { printf("FAIL: input gradient\n");     fail = 1; }
-    if (!fail) printf("\nall block gradient checks passed\n");
+    if (max_err >= 2e-2f && max_abs >= 1e-3f)       { printf("  FAIL: parameter gradients\n"); fail = 1; }
+    if (max_dx_err >= 2e-2f && max_dx_abs >= 1e-3f) { printf("  FAIL: input gradient\n");     fail = 1; }
+    if (!fail) printf("  ok\n");
 
     block_free(&blk); plist_free(&pl);
     mat_free(&gx); mat_free(&gt); mat_free(&y); mat_free(&dy); mat_free(&dx);
+    return fail;
+}
+
+int main(void) {
+    nn_seed(20260711);
+    int fail = 0;
+    fail |= check_block(0);   /* full temporal attention */
+    fail |= check_block(1);   /* single-node spatial attention */
+    if (!fail) printf("\nall block gradient checks passed\n");
     return fail;
 }

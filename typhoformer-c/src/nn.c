@@ -181,9 +181,10 @@ static void softmax_rows(Mat m) {
 }
 
 /* ---- Multi-head self-attention -------------------------------------- */
-MHA mha_new(int d_model, int n_heads, ParamList *pl, const char *name) {
+MHA mha_new(int d_model, int n_heads, int self_only, ParamList *pl, const char *name) {
     assert(d_model % n_heads == 0);
     MHA m; m.d_model = d_model; m.n_heads = n_heads; m.head_dim = d_model / n_heads;
+    m.self_only = self_only;
     m.q = linear_new(d_model, d_model, pl, name);
     m.k = linear_new(d_model, d_model, pl, name);
     m.v = linear_new(d_model, d_model, pl, name);
@@ -194,7 +195,15 @@ MHA mha_new(int d_model, int n_heads, ParamList *pl, const char *name) {
 }
 void mha_forward(MHA *m, const Mat x, Mat y) {
     const int S = x.rows, D = m->d_model, H = m->n_heads, hd = m->head_dim;
-    ensure(&m->Q, S, D); ensure(&m->K, S, D); ensure(&m->V, S, D); ensure(&m->Ocat, S, D);
+    ensure(&m->V, S, D); ensure(&m->Ocat, S, D);
+    if (m->self_only) {
+        /* single-element attention: output = O(V(x)) per position */
+        linear_forward(&m->v, x, m->V);
+        mat_copy(m->Ocat, m->V);
+        linear_forward(&m->o, m->Ocat, y);
+        return;
+    }
+    ensure(&m->Q, S, D); ensure(&m->K, S, D);
     for (int h = 0; h < H; ++h) ensure(&m->P[h], S, S);
     linear_forward(&m->q, x, m->Q);
     linear_forward(&m->k, x, m->K);
@@ -224,6 +233,11 @@ void mha_backward(MHA *m, const Mat dy, Mat dx) {
     const float scale = 1.0f / sqrtf((float)hd);
     Mat dOcat = mat_new(S, D);
     linear_backward(&m->o, dy, dOcat);
+    if (m->self_only) {                     /* dOcat == dV; q,k carry no grad */
+        linear_backward(&m->v, dOcat, dx);
+        mat_free(&dOcat);
+        return;
+    }
     Mat dQ = mat_new(S, D), dK = mat_new(S, D), dV = mat_new(S, D);
     Mat dP = mat_new(S, S), dsc = mat_new(S, S);
     for (int h = 0; h < H; ++h) {
@@ -279,9 +293,9 @@ void mha_free(MHA *m) {
 }
 
 /* ---- Transformer block (post-norm) ---------------------------------- */
-Block block_new(int d_model, int n_heads, int ff_dim, ParamList *pl, const char *name) {
+Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *pl, const char *name) {
     Block b; b.d = d_model;
-    b.attn = mha_new(d_model, n_heads, pl, name);
+    b.attn = mha_new(d_model, n_heads, self_only, pl, name);
     b.ln1 = layernorm_new(d_model, pl, name);
     b.ln2 = layernorm_new(d_model, pl, name);
     b.ff = ffn_new(d_model, ff_dim, pl, name);

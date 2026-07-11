@@ -6,7 +6,7 @@ LDLIBS  := -lm
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)
 
-TESTS   := tests/test_tensor tests/test_nn
+TESTS   := tests/test_tensor tests/test_nn tests/test_model
 BUILD   := $(filter-out src/main.o,$(OBJ))
 
 .PHONY: all test clean
