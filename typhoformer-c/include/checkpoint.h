@@ -11,9 +11,21 @@
  *   float32 parameters, in ParamList registration order (== model_new order)
  *
  * "TFW2" (feature stats, no coord block) and "TFW1" (no stats) still readable.
+ * The three versions are nested supersets — TFW3 = TFW2 + coord block, TFW2 =
+ * TFW1 + feature-stats block — so a v3 reader loads all three by branching on
+ * the magic tag to decide which optional blocks are present.
+ *
+ * WHY self-describing but untagged params: the header carries the full model
+ * geometry (the 9 ints) and the normalization statistics, but the parameter
+ * blob is just raw floats with no per-tensor tags. The reader recomputes each
+ * tensor's element count from a Config and reads exactly that many floats in
+ * registration order. Loading with a mismatched Config is therefore caught as a
+ * "parameter size mismatch" — the guarantee that eval-time model geometry (and
+ * the flags that determine it) matches the geometry used at train time.
  *
  * Optimizer state for resuming training is stored SEPARATELY (a ".opt" sidecar,
- * see checkpoint_save_optim) so inference checkpoints stay small.
+ * magic "TFO1", see checkpoint_save_optim) so inference checkpoints stay small —
+ * the Adam moments double the on-disk size and are useless for inference.
  */
 #ifndef TYPHOFORMER_CHECKPOINT_H
 #define TYPHOFORMER_CHECKPOINT_H

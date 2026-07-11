@@ -21,6 +21,21 @@
  * a CPU device via POCL (`make OPENCL=1 test-opencl`); and cuda/ — a
  * device-resident CUDA backend that compiles with nvcc. See backends/README.md.
  *
+ * How the seam works mechanically: every layer calls ONLY the functions above,
+ * never raw loops over Mat.data, so the set of kernels is a hard, exhaustive
+ * boundary between "model logic" and "how arithmetic runs on a device." A
+ * backend is selected at LINK TIME, not runtime: there is no vtable or function
+ * pointer here — you compile exactly one implementation of these symbols into
+ * the binary (src/tensor.c for CPU, backends/opencl/… or backends/cuda/… for a
+ * GPU) and the linker binds every call site to it. Swapping backends is a build
+ * choice (which .c/.cu to link), which is why retargeting needs zero edits to
+ * layer code.
+ *
+ * Device residency: on the CPU backend Mat.data is an ordinary host float*; on
+ * the CUDA backend it is a device pointer and the same kernels run on the GPU,
+ * so activations never round-trip to host between layers. The Mat struct is the
+ * shared handle; what its `data` points at is the backend's business.
+ *
  * This header intentionally declares nothing new: it documents the contract so
  * the seam is discoverable. Include tensor.h to call the kernels.
  */

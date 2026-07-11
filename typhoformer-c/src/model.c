@@ -62,26 +62,42 @@ PGF pgf_new(const Config *c, ParamList *pl) {
     p.s_dz = NULLMAT; p.s_dxn = NULLMAT; p.s_dxt = NULLMAT;
     return p;
 }
+/* Lazily (re)allocate *m to exactly r×cc floats, reusing the buffer when the
+ * shape already matches. Lets every module keep persistent scratch matrices that
+ * grow to the current batch/sequence length without reallocating each call. */
 static void ensure(Mat *m, int r, int cc) {
     if (m->data == NULL || m->rows != r || m->cols != cc) { if (m->data) mat_free(m); *m = mat_new(r, cc); }
 }
+/* Forward fusion. Builds cat=[xnum|xtext] per step, computes the sigmoid gate
+ * from it, projects each stream to D, then blends:
+ *   x~[i] = g[i]·xn[i] + (1-g[i])·xt[i]      (element-wise over all T·D entries).
+ * cat/gate/xn/xt are all cached because the backward needs them. */
 void pgf_forward(PGF *p, const Mat xnum, const Mat xtext, Mat xtilde) {
     const int T = xnum.rows, D = p->d_model;
     ensure(&p->cat, T, p->d_num + p->d_text);
     ensure(&p->gate, T, D); ensure(&p->xn, T, D); ensure(&p->xt, T, D);
     for (int i = 0; i < T; ++i) {
+        /* copy the numerical block then the text block into row i of cat */
         memcpy(&p->cat.data[i * (p->d_num + p->d_text)], &xnum.data[i * p->d_num],
                p->d_num * sizeof(float));
         memcpy(&p->cat.data[i * (p->d_num + p->d_text) + p->d_num], &xtext.data[i * p->d_text],
                p->d_text * sizeof(float));
     }
-    linear_forward(&p->fc_gate, p->cat, p->gate);
-    mat_sigmoid(p->gate);
-    linear_forward(&p->proj_num, xnum, p->xn);
-    linear_forward(&p->proj_text, xtext, p->xt);
+    linear_forward(&p->fc_gate, p->cat, p->gate);   /* gate logits [T,D] */
+    mat_sigmoid(p->gate);                           /* -> gate in (0,1), cached */
+    linear_forward(&p->proj_num, xnum, p->xn);      /* xn = proj_num(xnum)  [T,D] */
+    linear_forward(&p->proj_text, xtext, p->xt);    /* xt = proj_text(xtext) [T,D] */
     for (int i = 0; i < T * D; ++i)
         xtilde.data[i] = p->gate.data[i] * p->xn.data[i] + (1.0f - p->gate.data[i]) * p->xt.data[i];
 }
+/* Backward of the blend. Given dL/dx~ (and an optional direct gate penalty grad):
+ *   x~ = g·xn + (1-g)·xt   =>
+ *     d/dg   = dx~·(xn - xt)          (+ dgate_pen from the loss's gate penalty)
+ *     d/dxn  = dx~·g
+ *     d/dxt  = dx~·(1-g)
+ *   the gate passed through sigmoid, so dz (grad on the logit) = dg·g·(1-g).
+ * The three streams (xnum, xtext) are raw data inputs, so no input-grad is
+ * requested from the Linears (NULLMAT dx) — only their weight grads accumulate. */
 void pgf_backward(PGF *p, const Mat dxtilde, const Mat dgate_pen) {
     const int T = dxtilde.rows, D = p->d_model;
     ensure(&p->s_dz, T, D); ensure(&p->s_dxn, T, D); ensure(&p->s_dxt, T, D);
@@ -89,7 +105,7 @@ void pgf_backward(PGF *p, const Mat dxtilde, const Mat dgate_pen) {
     for (int i = 0; i < T * D; ++i) {
         float g = p->gate.data[i];
         float dgate = dxtilde.data[i] * (p->xn.data[i] - p->xt.data[i]);
-        if (dgate_pen.data) dgate += dgate_pen.data[i];
+        if (dgate_pen.data) dgate += dgate_pen.data[i];   /* gate-collapse penalty grad */
         dz.data[i]  = dgate * g * (1.0f - g);        /* through sigmoid */
         dxn.data[i] = dxtilde.data[i] * g;
         dxt.data[i] = dxtilde.data[i] * (1.0f - g);
@@ -107,6 +123,9 @@ void pgf_free(PGF *p) {
 /* =====================================================================
  * TimeMix
  * ===================================================================== */
+/* Init the mix matrix A and bias c with the same uniform(-1/in, 1/in) scheme
+ * nn.Linear uses (fan-in = in_steps), and register both with the ParamList so
+ * they train and gradient-check like any other weight. */
 TimeMix timemix_new(int in_steps, int out_steps, ParamList *pl) {
     TimeMix t; t.in_steps = in_steps; t.out_steps = out_steps;
     t.A = mat_new(out_steps, in_steps); t.dA = mat_new(out_steps, in_steps);
@@ -120,12 +139,19 @@ TimeMix timemix_new(int in_steps, int out_steps, ParamList *pl) {
     plist_add(pl, t.c, t.dc, out_steps, "timemix.c");
     return t;
 }
+/* y[o,d] = Σ_i A[o,i]·x[i,d] + c[o]. The matmul mixes over the time axis (rows);
+ * the bias broadcasts across the D feature columns. x is cached for the backward. */
 void timemix_forward(TimeMix *t, const Mat x, Mat y) {
     ensure(&t->xcache, x.rows, x.cols); mat_copy(t->xcache, x);
     mat_matmul(t->A, x, y);                          /* [out,in] @ [in,D] */
     for (int o = 0; o < t->out_steps; ++o)
         for (int d = 0; d < y.cols; ++d) y.data[o * y.cols + d] += t->c[o];
 }
+/* Backward of y = A·x + c:
+ *   dA[o,i] += Σ_d dy[o,d]·x[i,d]   (= dy · x^T)
+ *   dc[o]   += Σ_d dy[o,d]          (bias summed over the feature axis)
+ *   dx      =  A^T · dy             (grad back into the [in,D] sequence)
+ * Grads accumulate (+=) so multiple calls in a batch add up. */
 void timemix_backward(TimeMix *t, const Mat dy, Mat dx) {
     const int D = dy.cols;
     ensure(&t->s_tmp, t->out_steps, t->in_steps);
@@ -146,11 +172,18 @@ void timemix_free(TimeMix *t) {
 /* =====================================================================
  * Encoder
  * ===================================================================== */
+/* Build the encoder. NOTE the registration ORDER of parameters (input_proj,
+ * posenc, output_proj, then per-layer temporal[/spatial] blocks, then tmix)
+ * defines the flat parameter layout a checkpoint must match — the architecture
+ * switches are snapshotted here from the g_* globals so a saved model is only
+ * loadable with the same options. */
 Encoder encoder_new(const Config *c, ParamList *pl) {
     Encoder e; e.cfg = *c;
     e.use_spatial = !g_no_spatial; e.use_posenc = g_posenc; e.pool_last = g_pool_last;
     e.input_proj  = linear_new(c->d_model, c->d_model, pl, "enc.input_proj");
-    /* learned positional encoding, registered right after input_proj */
+    /* learned positional encoding, registered right after input_proj. Unlike a
+     * fixed sinusoid this is a trainable [T,D] table added to the projected
+     * input so the attention can tell time steps apart. */
     e.posenc = NULLMAT; e.dposenc = NULLMAT;
     if (e.use_posenc) {
         e.posenc = mat_new(c->in_len, c->d_model); e.dposenc = mat_new(c->in_len, c->d_model);
@@ -162,6 +195,12 @@ Encoder encoder_new(const Config *c, ParamList *pl) {
     e.temporal = (Block *)malloc(c->n_layers * sizeof(Block));
     e.spatial  = e.use_spatial ? (Block *)malloc(c->n_layers * sizeof(Block)) : NULL;
     for (int l = 0; l < c->n_layers; ++l) {
+        /* temporal block: self_only=0 -> full self-attention across the T steps.
+         * This is the path the optional ALiBi time bias (nn_set_timebias) acts on:
+         * it subtracts slope_h·|i-j| from the scores so nearer time steps attend
+         * more strongly, giving attention a built-in sense of temporal distance.
+         * spatial block: self_only=1 -> each position attends only to itself
+         * (a placeholder for multi-node attention; degenerate with a single storm). */
         e.temporal[l] = block_new(c->d_model, c->n_heads, c->d_ff, 0, pl, "enc.temporal");
         if (e.use_spatial) e.spatial[l] = block_new(c->d_model, c->n_heads, c->d_ff, 1, pl, "enc.spatial");
     }
@@ -174,21 +213,32 @@ Encoder encoder_new(const Config *c, ParamList *pl) {
     e.tmid = mat_new(1, c->d_model); e.dtmid = mat_new(1, c->d_model);
     return e;
 }
+/* Forward: x~[T,D] -> henc[1,D]. cur/nxt are two [T,D] buffers ping-ponged so
+ * each block writes into the spare buffer and we swap, avoiding per-layer allocs. */
 void encoder_forward(Encoder *e, const Mat xtilde, Mat henc) {
     const int L = e->cfg.n_layers, T = e->cfg.in_len, D = e->cfg.d_model;
     Mat cur = e->b0, nxt = e->b1, tmp;
     linear_forward(&e->input_proj, xtilde, cur);
-    if (e->use_posenc) for (int i = 0; i < T * D; ++i) cur.data[i] += e->posenc.data[i];
-    /* alternate temporal then (optionally) spatial WITHIN each layer */
+    if (e->use_posenc) for (int i = 0; i < T * D; ++i) cur.data[i] += e->posenc.data[i];  /* + learned PE */
+    /* alternate temporal then (optionally) spatial WITHIN each layer (not two
+     * separate stacks): every layer mixes over time, then optionally over nodes. */
     for (int l = 0; l < L; ++l) {
         block_forward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
         if (e->use_spatial) { block_forward(&e->spatial[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
     }
     if (e->use_encseq) mat_copy(e->encseq, cur);   /* expose the pre-pool sequence (--xattn memory) */
+    /* pool the [T,D] sequence to a single [1,D] summary tmid: either the last
+     * step (causal "most recent state") or the learned TimeMix weighted average. */
     if (e->pool_last) memcpy(e->tmid.data, &cur.data[(T - 1) * D], D * sizeof(float)); /* last step */
     else              timemix_forward(&e->tmix, cur, e->tmid);                          /* [1,D] */
-    linear_forward(&e->output_proj, e->tmid, henc);   /* [1,D] */
+    linear_forward(&e->output_proj, e->tmid, henc);   /* [1,D] context */
 }
+/* Backward: mirror of encoder_forward, unwinding in reverse.
+ *   output_proj^T -> dtmid, then "un-pool" dtmid back to a [T,D] grad (scatter to
+ *   the last row for pool_last, or timemix_backward for the learned average),
+ *   add the cross-attention memory grad (dencseq) if --xattn, run the blocks in
+ *   reverse (spatial before temporal — opposite of the forward order), fold the
+ *   grad into the positional table, and finally input_proj^T -> dxtilde. */
 void encoder_backward(Encoder *e, const Mat dhenc, Mat dxtilde) {
     const int L = e->cfg.n_layers, T = e->cfg.in_len, D = e->cfg.d_model;
     linear_backward(&e->output_proj, dhenc, e->dtmid);
@@ -200,7 +250,7 @@ void encoder_backward(Encoder *e, const Mat dhenc, Mat dxtilde) {
         if (e->use_spatial) { block_backward(&e->spatial[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp; }
         block_backward(&e->temporal[l], cur, nxt); tmp = cur; cur = nxt; nxt = tmp;
     }
-    if (e->use_posenc) for (int i = 0; i < T * D; ++i) e->dposenc.data[i] += cur.data[i]; /* += identity path */
+    if (e->use_posenc) for (int i = 0; i < T * D; ++i) e->dposenc.data[i] += cur.data[i]; /* PE added, so its grad = cur */
     linear_backward(&e->input_proj, cur, dxtilde);
 }
 void encoder_free(Encoder *e) {
@@ -219,6 +269,10 @@ void encoder_free(Encoder *e) {
 /* =====================================================================
  * Decoder (autoregressive; training uses steps == 1)
  * ===================================================================== */
+/* Allocate exactly one correction head according to the active flag. The heads
+ * are mutually exclusive and their final layer is zero-initialised in every
+ * "anchored" mode (delta/cv/gru/xattn) so the untrained rollout emits the
+ * physical baseline and gradient descent only has to learn the residual. */
 Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
     d.use_cv = g_cv; d.use_gru = g_gru; d.use_xattn = g_xattn;
@@ -248,6 +302,10 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
             memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
         }
     }
+    /* Per-step caches: one Mat slot per rollout step so the whole autoregressive
+     * sequence can be replayed in the backward pass. All scratch starts empty
+     * (NULLMAT) and is grown lazily by ensure() on first use. s_dmem is the only
+     * one sized eagerly, since it must exist to receive the xattn memory grad. */
     d.zc  = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.h1c = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.ac  = (Mat *)calloc(d.max_steps, sizeof(Mat));
@@ -258,18 +316,25 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
     d.s_xq = NULLMAT; d.s_dmem = g_xattn ? mat_new(c->in_len, c->d_model) : NULLMAT;
     return d;
 }
+/* Autoregressive rollout. State threads across steps as p (last position) and,
+ * in the second-order heads, v (velocity). Every step writes preds[s] = y and
+ * then sets p := y so the next step consumes its own output. The four branches
+ * differ only in how the correction c is produced and what the anchor is. */
 void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vseed, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
     assert(steps <= d->max_steps);
     if (d->use_xattn) {
         /* Constant-velocity rollout whose context is per-step cross-attention over
          * the encoder sequence (memory set by the model via xattn_set_memory).
-         * fc1 input is [context_s ; p ; v]; fc2 zero-init -> starts at cv. */
+         * Each step forms query = [p ; v], attends over encseq to get ctx, and
+         * feeds fc1 input [ctx ; p ; v]; fc2 zero-init -> ŷ = p+v at init (cv).
+         * ctx replaces the STATIC pooled henc — the context is recomputed every
+         * step from the current state, unlike the cv/gru heads. */
         ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O);
         ensure(&d->s_v, 1, O); ensure(&d->s_hid0, 1, H); ensure(&d->s_xq, 1, 2 * O);
         Mat p = d->s_yt, a = d->s_a, c = d->s_ytn, v = d->s_v, ctx = d->s_hid0, xq = d->s_xq;
         mat_copy(p, yprev);
-        if (vseed.data) mat_copy(v, vseed); else mat_zero(v);
+        if (vseed.data) mat_copy(v, vseed); else mat_zero(v);   /* seed velocity (0 if none) */
         for (int s = 0; s < steps; ++s) {
             ensure(&d->zc[s], 1, H + 2 * O); ensure(&d->h1c[s], 1, H); ensure(&d->ac[s], 1, H);
             memcpy(&xq.data[0], p.data, O * sizeof(float));        /* query = [p ; v] */
@@ -279,21 +344,25 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
             memcpy(&d->zc[s].data[H],       p.data,   O * sizeof(float));
             memcpy(&d->zc[s].data[H + O],   v.data,   O * sizeof(float));
             linear_forward(&d->fc1, d->zc[s], d->h1c[s]);
-            mat_copy(a, d->h1c[s]); mat_relu(a); mat_copy(d->ac[s], a);
-            linear_forward(&d->fc2, a, c);
+            mat_copy(a, d->h1c[s]); mat_relu(a); mat_copy(d->ac[s], a);  /* a = relu(fc1(z)), cached */
+            linear_forward(&d->fc2, a, c);                              /* curvature correction c */
             for (int i = 0; i < O; ++i) {
-                float y = p.data[i] + v.data[i] + c.data[i];
-                v.data[i] += c.data[i];
-                p.data[i]  = y;
+                float y = p.data[i] + v.data[i] + c.data[i];   /* cv anchor + correction */
+                v.data[i] += c.data[i];                        /* v_{s+1} = v_s + c */
+                p.data[i]  = y;                                /* p_{s+1} = y */
                 preds.data[s * O + i] = y;
             }
         }
         return;
     }
     if (d->use_gru) {
-        /* Recurrent constant-velocity rollout. Same anchor arithmetic as cv, but
-         * the correction is c = fc_out(GRU([p;v], hid)) with hid carried across
-         * steps and hid_0 = the encoder context. */
+        /* Recurrent constant-velocity rollout. Same anchor arithmetic as cv
+         * (ŷ = p + v + c ; v += c), but the correction is
+         *   c = fc_out( GRU([p;v], hid_{s-1}) )
+         * with the hidden state carried across steps (hid_0 = encoder context).
+         * The GRU gives the multi-step rollout real memory that a memoryless MLP
+         * lacks; fc_out zero-init keeps the untrained anchor at cv. ac[s] doubles
+         * as the cached hidden state hid_s that feeds the next step. */
         ensure(&d->s_yt, 1, O); ensure(&d->s_ytn, 1, O); ensure(&d->s_v, 1, O); ensure(&d->s_hid0, 1, H);
         Mat p = d->s_yt, c = d->s_ytn, v = d->s_v, hid_prev = d->s_hid0;
         mat_copy(p, yprev);
@@ -311,7 +380,7 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
                 p.data[i]  = y;
                 preds.data[s * O + i] = y;
             }
-            hid_prev = d->ac[s];
+            hid_prev = d->ac[s];                        /* carry hidden state to step s+1 */
         }
         return;
     }
@@ -345,6 +414,11 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
         }
         return;
     }
+    /* First-order head (plain or delta). z = [h ; y_prev]; ytn = fc2(relu(fc1(z))).
+     *   plain:  y_t = ytn                 (fc2 predicts the absolute next coord)
+     *   delta:  y_t = y_{t-1} + ytn       (fc2 predicts a displacement; zero-init
+     *           fc2 -> untrained model outputs persistence y_t = y_{t-1})
+     * The static pooled context h is re-fed at every step (there is no velocity). */
     ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O);
     Mat yt = d->s_yt, a = d->s_a, ytn = d->s_ytn;
     mat_copy(yt, yprev);
@@ -378,13 +452,19 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
         Mat dpnext = d->s_dynext, dvnext = d->s_dvnext, dctx = d->s_dhc, dxq = d->s_dx2;
         mat_zero(dpnext); mat_zero(dvnext);
         for (int s = steps - 1; s >= 0; --s) {
+            /* dc_s: c feeds pred[s] and (via v+=c, p=y) both p_{s+1} and v_{s+1},
+             * whose accumulated grads arrived as dpnext/dvnext from step s+1. */
             for (int i = 0; i < O; ++i)
                 dc.data[i] = dpreds.data[s * O + i] + dpnext.data[i] + dvnext.data[i];
             mat_copy(d->fc2.xcache, d->ac[s]); linear_backward(&d->fc2, dc, da);
-            for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[s].data[i] > 0.0f) ? da.data[i] : 0.0f;
+            for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[s].data[i] > 0.0f) ? da.data[i] : 0.0f;  /* relu' */
             mat_copy(d->fc1.xcache, d->zc[s]); linear_backward(&d->fc1, dh1, dz);
-            for (int i = 0; i < H; ++i) dctx.data[i] = dz.data[i];       /* grad into context */
-            xattn_backward_step(&d->xattn, s, dctx, dxq);                /* dxq = [dp_x ; dv_x] */
+            for (int i = 0; i < H; ++i) dctx.data[i] = dz.data[i];       /* fc1's ctx-slot grad -> attn */
+            xattn_backward_step(&d->xattn, s, dctx, dxq);                /* dxq = [dp_x ; dv_x] query grads */
+            /* Thread the state grads back to step s-1. Same structure as the cv
+             * recurrence but with the extra query-path terms dxq from the per-step
+             * cross-attention (the query was [p;v]). dp_net/dv_net are fc1's grads
+             * on the p/v slots of z. */
             for (int i = 0; i < O; ++i) {
                 float gs = dpreds.data[s * O + i];
                 float dp_old = dpnext.data[i], dv_old = dvnext.data[i];
@@ -510,18 +590,22 @@ static CoSpatial cospatial_new(int nf, int d, ParamList *pl) {
 static void ensure_m(Mat *m, int r, int c) {
     if (m->data == NULL || m->rows != r || m->cols != c) { if (m->data) mat_free(m); *m = mat_new(r, c); }
 }
-/* out[1,D] = henc + attention(context over [context; neighbour tokens]) */
+/* out[1,D] = henc + attention(context over [context; neighbour tokens]).
+ * Builds a token sequence whose row 0 is the encoded context and rows 1..c are
+ * the co-active storms' states projected to D, runs self-attention over it, and
+ * keeps row 0 as a residual add onto henc. So the context gets to attend over
+ * the storms sharing its timestep. With zero neighbours it is exactly identity. */
 static void cospatial_forward(CoSpatial *cs, const Mat henc, const Mat nbr, int cnt, Mat out) {
     const int D = cs->d;
-    int c = cnt < 0 ? 0 : (cnt > nbr.rows ? nbr.rows : cnt);
+    int c = cnt < 0 ? 0 : (cnt > nbr.rows ? nbr.rows : cnt);   /* clamp count to [0, rows] */
     cs->cnt = c;
     if (c == 0) { mat_copy(out, henc); return; }       /* no neighbours -> identity */
     Mat nbr_c = { c, cs->nf, nbr.data };               /* first c neighbour rows */
     ensure_m(&cs->tok, c, D);
     linear_forward(&cs->proj, nbr_c, cs->tok);         /* project neighbours to D */
     ensure_m(&cs->seq, 1 + c, D); ensure_m(&cs->out, 1 + c, D);
-    memcpy(&cs->seq.data[0], henc.data, (size_t)D * sizeof(float));
-    memcpy(&cs->seq.data[D], cs->tok.data, (size_t)c * D * sizeof(float));
+    memcpy(&cs->seq.data[0], henc.data, (size_t)D * sizeof(float));         /* row 0 = context */
+    memcpy(&cs->seq.data[D], cs->tok.data, (size_t)c * D * sizeof(float));  /* rows 1..c = neighbours */
     mha_forward(&cs->attn, cs->seq, cs->out);          /* context (row 0) attends over all */
     for (int i = 0; i < D; ++i) out.data[i] = henc.data[i] + cs->out.data[i];   /* residual */
 }
@@ -546,6 +630,10 @@ static void cospatial_free(CoSpatial *cs) {
 /* =====================================================================
  * Full model
  * ===================================================================== */
+/* Assemble the full model. Sub-modules register their parameters with pl in
+ * construction order (pgf, encoder, [co-spatial], decoder), which fixes the flat
+ * parameter vector a checkpoint is saved/loaded against — so all the g_* option
+ * flags must be set BEFORE this call and match at load time. */
 Model model_new(const Config *c, ParamList *pl) {
     Model m; m.cfg = *c;
     m.pgf = pgf_new(c, pl);
@@ -570,6 +658,10 @@ void model_set_neighbors(Model *m, const Mat nbr, int cnt) {
 void model_set_seed_velocity(Model *m, const Mat v) {
     mat_copy(m->vseed, v);
 }
+/* Full forward: fuse -> encode -> (co-spatial refine) -> decode.
+ * The decoder's context is henc, or henc2 when co-spatial attention is on.
+ * In --xattn mode the encoder's per-step sequence is handed to the decoder's
+ * cross-attention as the fixed K/V memory before the rollout. */
 void model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev) {
     pgf_forward(&m->pgf, xnum, xtext, m->xtilde);
     encoder_forward(&m->enc, m->xtilde, m->henc);
@@ -578,6 +670,11 @@ void model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev) {
     if (m->use_co) { cospatial_forward(&m->co, m->henc, m->nbr, m->nbr_cnt, m->henc2); ctx = m->henc2; }
     decoder_forward(&m->dec, ctx, yprev, m->vseed, m->cfg.pred_len, m->pred);
 }
+/* Full backward: exact reverse of model_forward. The decoder writes the context
+ * grad into dhenc2 (then co-spatial backward folds it into dhenc) or straight
+ * into dhenc. In --xattn mode the decoder's context grad is zero (see
+ * decoder_backward) and all the encoder gradient instead arrives through the
+ * attended-memory grad s_dmem, which is routed into the encoder's dencseq. */
 void model_backward(Model *m, const Mat dpred, const Mat dgate_pen) {
     if (m->use_co) {
         decoder_backward(&m->dec, dpred, m->dhenc2);
@@ -598,6 +695,13 @@ void model_free(Model *m) {
     mat_free(&m->dxtilde); mat_free(&m->pred);
 }
 
+/* Loss = MSE(pred,Y) + lambda·mean( relu(0.6 - gate)^2 ).
+ * The second term is the gate-collapse penalty: it activates only where a gate
+ * channel drops below 0.6, pushing the fusion to keep listening to the numerical
+ * stream instead of leaning entirely on text. Gradients (optional outputs):
+ *   dpred[i]     = (2/No)·(pred - Y)
+ *   dgate_pen[i] = lambda·(-2/Ng)·(0.6 - gate)   where 0.6 - gate > 0, else 0
+ * (the minus sign is d/dgate of (0.6 - gate)^2). dgate_pen feeds pgf_backward. */
 double model_loss(const Mat pred, const Mat Y, const Mat gate, float lambda,
                   Mat dpred, Mat dgate_pen) {
     const int No = pred.rows * pred.cols, Ng = gate.rows * gate.cols;
