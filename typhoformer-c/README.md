@@ -238,16 +238,19 @@ floor). But the more important question is whether it *forecasts* — see
 [docs/FINDINGS.md](docs/FINDINGS.md). On the **held-out test storms** (never seen
 in training or selection), varying only the storm split:
 
-| what | held-out test ΔR | persistence |
-|:--|:--:|:--:|
-| model, 5 different splits | **128.5 ± 41.3 km** (min 95, max 206) | 123.5 km |
-| **numbers-only** (`--no_text`, split 42) | **156.0 km** | 102.7 km |
-| with-text (full model, split 42) | 172.9 km | 102.7 km |
+| what | params | held-out test ΔR | persistence |
+|:--|:--:|:--:|:--:|
+| model, 5 different splits | 198 K | **128.5 ± 41.3 km** (min 95, max 206) | 123.5 km |
+| **numbers-only** (`--no_text`, split 42) | 198 K | **156.0 km** | 102.7 km |
+| with-text (compact, split 42) | 198 K | 172.9 km | 102.7 km |
+| with-text (**full config**, split 42) | 5.1 M | 158.0 km | 102.7 km |
 
-Two honest conclusions: the model is at **rough parity with persistence** (the
-±41 km split noise dwarfs the ~5 km gap), and the **language branch does not
-help** here — numbers-only is ~17 km *better* on the tested split, contradicting
-the paper's premise on this data.
+Three honest conclusions: the model is at **rough parity with persistence** (the
+±41 km split noise dwarfs the ~5 km gap); the **language branch does not help**
+here — numbers-only is ~17 km *better* on the tested split, contradicting the
+paper's premise on this data; and **26× more parameters** (the full paper config)
+does **not** close the gap, so the bottleneck is the ~98-storm dataset, not model
+size.
 
 > **Honesty note.** Earlier versions reported ΔR ≈ 79 km "beating persistence."
 > That was data leakage — normalization fit on the whole dataset and overlapping
