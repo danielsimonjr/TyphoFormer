@@ -1,8 +1,10 @@
 # TyphoFormer-C — pure C, standard library only.
 CC      ?= gcc
 OPT     ?= -O3
-CFLAGS  := -std=c11 $(OPT) -Wall -Wextra -Wpedantic -Iinclude
-LDLIBS  := -lm
+# -pthread: data-parallel multicore training (src/parallel.c). Portable; on
+# platforms without pthreads, drop it and build --threads=1 only.
+CFLAGS  := -std=c11 $(OPT) -Wall -Wextra -Wpedantic -Iinclude -pthread
+LDLIBS  := -lm -pthread
 
 # Opt-in native SIMD (non-portable binary; source stays pure C):  make NATIVE=1
 ifeq ($(NATIVE),1)
@@ -18,7 +20,8 @@ endif
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)
 
-TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data tests/test_golden tests/test_module
+TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data \
+           tests/test_golden tests/test_module tests/test_parallel
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
 .PHONY: all lib test test-san clean

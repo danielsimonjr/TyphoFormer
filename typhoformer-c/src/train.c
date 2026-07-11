@@ -10,6 +10,7 @@
 #include "data.h"
 #include "model.h"
 #include "optim.h"
+#include "parallel.h"
 
 #include <math.h>
 #include <time.h>
@@ -85,7 +86,7 @@ static Dataset load_source(const char *bin, const char *csv, const char *emb, in
 
 /* ---- train ---------------------------------------------------------- */
 static int cmd_train(int argc, char **argv) {
-    int epochs = 10, full = 0, batch = 8;
+    int epochs = 10, full = 0, batch = 8, threads = 1;
     int pred_len = -1, d_model = -1, d_ff = -1, n_layers = -1, n_heads = -1, in_len = -1;
     float lambda = 0.1f, lr = 1e-3f, wd = 1e-5f, lr_decay = 1.0f;
     int patience = 0;                 /* 0 = disabled (early stopping) */
@@ -104,6 +105,7 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--n_heads=", 10))  n_heads = atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--in_len=", 9))    in_len = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--batch=", 8))     batch = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--threads=", 10))  threads = atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--lr=", 5))        lr = (float)atof(argv[i] + 5);
         else if (!strncmp(argv[i], "--wd=", 5))        wd = (float)atof(argv[i] + 5);
         else if (!strncmp(argv[i], "--lambda=", 9))    lambda = (float)atof(argv[i] + 9);
@@ -128,11 +130,13 @@ static int cmd_train(int argc, char **argv) {
     dataset_split(&ds, 0.15f, 42, &train, &ntr, &val, &nva);
     printf("records=%d samples=%d  train=%d val=%d\n", ds.n_records, ds.n_samples, ntr, nva);
 
+    if (threads < 1) threads = 1;
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     Adam opt = adam_new(&pl, lr, wd);
-    printf("model params = %ld | d_model=%d layers=%d heads=%d d_ff=%d pred_len=%d\n\n",
-           plist_num_params(&pl), c.d_model, c.n_layers, c.n_heads, c.d_ff, c.pred_len);
+    ParTrainer *pt = (threads > 1) ? partrainer_new(&c, threads) : NULL;
+    printf("model params = %ld | d_model=%d layers=%d heads=%d d_ff=%d pred_len=%d | threads=%d\n\n",
+           plist_num_params(&pl), c.d_model, c.n_layers, c.n_heads, c.d_ff, c.pred_len, threads);
 
     Mat xn = mat_new(c.in_len, c.d_num), xt = mat_new(c.in_len, c.d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(c.pred_len, 2);
@@ -148,18 +152,24 @@ static int cmd_train(int argc, char **argv) {
         double run_loss = 0.0; int nb = 0;
         for (int b = 0; b < ntr; b += batch) {
             int bs = (b + batch <= ntr) ? batch : (ntr - b);
-            plist_zero_grad(&pl);
-            double bl = 0.0;
-            for (int k = 0; k < bs; ++k) {
-                dataset_get(&ds, train[b + k], xn, xt, yp, Y);
-                model_forward(&m, xn, xt, yp);
-                bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
-                for (int i = 0; i < c.pred_len * c.out_dim; ++i) dpred.data[i] /= bs;
-                for (int i = 0; i < c.in_len * c.d_model; ++i)  dgate.data[i] /= bs;
-                model_backward(&m, dpred, dgate);
+            if (pt) {                                /* data-parallel across cores */
+                partrainer_broadcast(pt, &pl);       /* replicas <- master weights */
+                run_loss += partrainer_step_grads(pt, &pl, &ds, train, b, bs, lambda);
+            } else {                                 /* serial (byte-identical golden path) */
+                plist_zero_grad(&pl);
+                double bl = 0.0;
+                for (int k = 0; k < bs; ++k) {
+                    dataset_get(&ds, train[b + k], xn, xt, yp, Y);
+                    model_forward(&m, xn, xt, yp);
+                    bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
+                    for (int i = 0; i < c.pred_len * c.out_dim; ++i) dpred.data[i] /= bs;
+                    for (int i = 0; i < c.in_len * c.d_model; ++i)  dgate.data[i] /= bs;
+                    model_backward(&m, dpred, dgate);
+                }
+                run_loss += bl / bs;
             }
             adam_step(&opt, &pl);
-            run_loss += bl / bs; ++nb;
+            ++nb;
         }
         Eval e = evaluate(&m, &ds, val, nva);
         printf("epoch %2d | train loss %.5f | val MAE %.4f | val dR %.2f km\n", ep, run_loss / nb, e.mmae, e.mkm);
@@ -177,6 +187,7 @@ static int cmd_train(int argc, char **argv) {
     print_horizons(&best_e);
 
     mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
+    if (pt) partrainer_free(pt);
     free(train); free(val); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
     return 0;
 }
