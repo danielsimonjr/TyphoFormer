@@ -232,7 +232,7 @@ For a lightweight, portable build with **no machine-learning stack to install**,
 - **⚙️ Optimized math.** Hand-written, **cache-blocked** matrix multiplies (`ikj` / `pij` loop orders) compiled at `-O3` — ≈ 6 s/epoch for the compact demo config and ≈ 190 s/epoch for the full 5.1 M-parameter paper config; `make NATIVE=1` (SIMD) and `--threads=N` (data-parallel multicore) scale it further.
 - **✅ Correctness-checked.** Every layer is validated by finite-difference gradient checks (tensor core, a full transformer block, the whole model at `pred_len=3`), plus a golden-loss regression, checkpoint round-trip, `.npy`/split, module-interface, and multicore-equivalence tests — under a **gcc + clang** CI matrix with sanitizers and valgrind.
 - **📈 Trains end to end.** On the bundled data it converges and beats a persistence baseline (validation ΔR **79 km** vs **126 km** after 30 epochs), with per-horizon (6h/12h/…) metrics and in-repo persistence / CLIPER baselines.
-- **🧱 Built to be extended.** A pluggable [`Module`](typhoformer-c/include/module.h) interface for new layers, a documented [compute-backend seam](typhoformer-c/include/backend.h) (CPU + a CUDA reference under [`backends/`](typhoformer-c/backends/)), and [data-parallel multicore](typhoformer-c/include/parallel.h) training — each with its own gradient/equivalence test. Curated **labs, a glossary, and a theory↔code map** turn it into a course.
+- **🧱 Built to be extended.** A pluggable [`Module`](typhoformer-c/include/module.h) interface for new layers, a documented [compute-backend seam](typhoformer-c/include/backend.h) with two reference backends under [`backends/`](typhoformer-c/backends/) — a **runnable OpenCL** backend (verified end-to-end on a CPU device via POCL) and a **CUDA** backend (compiles with `nvcc`) — and [data-parallel multicore](typhoformer-c/include/parallel.h) training, each with its own gradient/equivalence test. Curated **labs, a glossary, and a theory↔code map** turn it into a course.
 - **🛠️ Full CLI + tooling.** Six subcommands with configurable hyperparameters, plus `tools/` for the offline GPT-4o / MiniLM preprocessing (the only stages that stay Python, since they need external models).
 - **📜 MIT-licensed.** The port is original clean-room code, so it carries its own permissive license ([`typhoformer-c/LICENSE`](typhoformer-c/LICENSE)).
 
@@ -268,7 +268,8 @@ TyphoFormer/
 │   │   └── train.c                     #     train/eval/prepare/predict/baseline/bench (main)
 │   ├── backends/                       #   compute backends behind the kernel seam
 │   │   ├── README.md                   #     how to retarget the model to a device
-│   │   └── cuda/tensor_cuda.cu         #     compile-ready GPU reference (needs nvcc)
+│   │   ├── opencl/tensor_opencl.c      #     runnable OpenCL backend (verified on POCL)
+│   │   └── cuda/tensor_cuda.cu         #     CUDA backend (compiles with nvcc)
 │   ├── tests/                          #   gradient checks + regression + I/O tests
 │   │   └── test_{tensor,nn,model,data,golden,module,parallel,checkpoint,npy}.c
 │   ├── tools/                          #   offline preprocessing (Python)

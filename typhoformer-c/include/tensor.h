@@ -5,9 +5,19 @@
 #ifndef TYPHOFORMER_TENSOR_H
 #define TYPHOFORMER_TENSOR_H
 
+/* Portable "does not return" marker: _Noreturn in C11, [[noreturn]] in C++
+ * (so device backends compiled as C++ — e.g. CUDA .cu — accept this header). */
+#if defined(__cplusplus)
+#  define TF_NORETURN [[noreturn]]
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#  define TF_NORETURN _Noreturn
+#else
+#  define TF_NORETURN
+#endif
+
 /* Print a message to stderr and exit(1). Used for unrecoverable I/O and
  * format errors throughout the CLI. */
-_Noreturn void die(const char *fmt, ...);
+TF_NORETURN void die(const char *fmt, ...);
 
 /* Row-major dense matrix of 32-bit floats (data has rows*cols elements). */
 typedef struct {

@@ -11,6 +11,7 @@ tests/test_parallel
 tests/test_checkpoint
 tests/test_npy
 typhoformer
+backends/opencl/test_opencl
 ._test_*.tmp
 ._test_*.tmp.npy
 *.bin

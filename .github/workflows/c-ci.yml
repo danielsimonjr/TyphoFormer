@@ -56,3 +56,31 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y valgrind
       - name: Run tests under valgrind
         run: make test-valgrind
+
+  # OpenCL backend: run the model through OpenCL on a CPU device (POCL).
+  opencl:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typhoformer-c
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install POCL (CPU OpenCL) + headers
+        run: sudo apt-get update && sudo apt-get install -y pocl-opencl-icd ocl-icd-opencl-dev opencl-headers clinfo
+      - name: Show OpenCL device
+        run: clinfo -l || true
+      - name: Verify OpenCL backend (kernel cross-check + full-model gradient check)
+        run: make OPENCL=1 test-opencl
+
+  # CUDA backend: compile-only with nvcc (no GPU on CI runners, so it cannot run).
+  cuda-compile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typhoformer-c/backends/cuda
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CUDA toolkit (nvcc)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit
+      - name: Compile the CUDA backend
+        run: make        # produces libtyphoformer_cuda.a; execution needs an NVIDIA GPU

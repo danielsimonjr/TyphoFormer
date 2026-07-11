@@ -16,8 +16,10 @@
  *   vector:   mat_add_bias  mat_colsum  mat_scale  mat_axpy
  *   pointwise:mat_relu  mat_sigmoid
  *
- * A reference GPU backend is provided under backends/cuda/ (requires nvcc;
- * not built by the default Makefile). See backends/README.md.
+ * Two reference backends are provided under backends/ (neither is built by the
+ * default Makefile): opencl/ — a runnable OpenCL backend, verified end-to-end on
+ * a CPU device via POCL (`make OPENCL=1 test-opencl`); and cuda/ — a
+ * device-resident CUDA backend that compiles with nvcc. See backends/README.md.
  *
  * This header intentionally declares nothing new: it documents the contract so
  * the seam is discoverable. Include tensor.h to call the kernels.

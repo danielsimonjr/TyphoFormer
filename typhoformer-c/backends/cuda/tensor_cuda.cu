@@ -35,7 +35,7 @@ extern "C" {
 
 /* ---- error plumbing -------------------------------------------------- */
 
-extern "C" _Noreturn void die(const char *fmt, ...) {
+extern "C" TF_NORETURN void die(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);

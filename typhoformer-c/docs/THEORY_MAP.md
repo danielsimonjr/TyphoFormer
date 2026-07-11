@@ -52,7 +52,7 @@ loss = MSE(ŷ, Y) + λ·gate-penalty
 | Seam | Interface | Reference implementation |
 |:--|:--|:--|
 | **New layer/block** as a pluggable module | `Module` vtable, `Sequential` | `include/module.h`, `src/module.c`, `tests/test_module.c` |
-| **New compute device** (GPU, accelerator) | the ~13 kernels in `include/tensor.h` | CPU: `src/tensor.c`; GPU reference: `backends/cuda/tensor_cuda.cu` (see `backends/README.md`) |
+| **New compute device** (GPU, accelerator) | the ~13 kernels in `include/tensor.h` | CPU: `src/tensor.c`; runnable OpenCL: `backends/opencl/tensor_opencl.c`; CUDA: `backends/cuda/tensor_cuda.cu` (see `backends/README.md`) |
 | **Multicore data-parallel training** | replicate + broadcast + reduce | `include/parallel.h`, `src/parallel.c`, `tests/test_parallel.c` |
 | **New optimizer** | consume a `ParamList` | `src/optim.c` (Adam) |
 | **New embedding/description model** | precompute → `.npy` the C loader reads | `tools/gen_*.py`, `src/data.c` |
