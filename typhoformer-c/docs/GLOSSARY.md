@@ -126,6 +126,26 @@ used for early stopping / checkpoint selection.
 stats) so the regression targets are unit-scaled and balanced; predictions are
 de-normalized back to degrees for metrics. Code: `dataset_denorm`, `src/data.c`.
 
+**Motion features** — the storm's position and velocity (`lat, lon, Δlat, Δlon`)
+added to the model input (`--motion`). By default the inputs are intensity only,
+so the model is blind to how the storm is moving; adding motion is the single
+biggest improvement to forecast skill. Code: `dataset_add_motion`, `src/data.c`.
+
+**Delta / displacement prediction** — having the decoder output the *change* from
+the previous coordinate (`ŷ_t = ŷ_{t-1} + Δ`) instead of the absolute position,
+with the output layer zero-initialised so it starts at persistence and learns the
+correction (`--delta`). Improves accuracy and stability. Code: `model_set_delta`,
+`decoder_forward`.
+
+**km-aware loss** — weighting the longitude error by `cos²(latitude)` so the
+training objective approximates squared kilometres (a degree of longitude is
+`cos(lat)` shorter than a degree of latitude). Implemented as `--km_loss`; tested
+and found *not* to help on this data (an honest null result).
+
+**Constant-velocity / CLIPER baseline** — extrapolate the last observed velocity
+linearly. The honest bar a learned model must beat (~39 km @ 6h here), much
+stronger than persistence. Code: `cmd_baseline`, `src/train.c`.
+
 **Resume** — continuing an interrupted training run from a checkpoint plus its
 `.opt` sidecar (Adam moments + step + lr), so the optimizer state is restored
 rather than restarted. Code: `checkpoint_save_optim`, `--resume`.

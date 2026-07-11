@@ -42,6 +42,8 @@ loss = MSE(ŷ, Y) + λ·gate-penalty
 | **TimeMix pooling** | `y = A·x + c`, `[out,in]·[in,D]` | `timemix_forward` `src/model.c` | `timemix_backward` |
 | **Spatio-temporal encoder** | stack temporal+spatial blocks, pool T→1 | `encoder_forward` `src/model.c` | `encoder_backward` |
 | **Autoregressive decoder** | `ŷ_s = f(h_enc, ŷ_{s−1})`, feeding own output | `decoder_forward` `src/model.c` | `decoder_backward` |
+| **Delta decoder** (`--delta`) | `ŷ_s = ŷ_{s−1} + Δ`, `fc2` zero-init (start at persistence) | `decoder_forward` (`model_delta`) | `decoder_backward` (identity term) |
+| **Motion features** (`--motion`) | append `lat, lon, Δlat, Δlon` to the input | `dataset_add_motion` `src/data.c` | — |
 | **Full model** | compose PGF→encoder→decoder | `model_forward` `src/model.c` | `model_backward` |
 | **Loss** | `MSE(ŷ,Y) + λ·mean(relu(0.6−g)²)` | `model_loss` `src/model.c` | (returns `dpred`, `dgate`) |
 | **AdamW (decoupled decay)** | `m,v` moments; bias-corrected step; `w−=lr·wd·w` | `adam_step` `src/optim.c` | — |

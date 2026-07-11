@@ -28,6 +28,14 @@ Y      [H_p, 2]    the future (lat, lon) target(s);  H_p = pred_len (=1 here)
 `T = in_len = 12`, `D = d_model`, `H_p = pred_len = 1`. Everything is processed
 **one sample at a time**; a mini-batch is a loop that sums gradients.
 
+> **Important — motion features.** Those 14 numerical features are *intensity*
+> only; the storm's **position and velocity are not in the input** by default (they
+> only seed the decoder and form the targets). A model can't extrapolate motion it
+> can't see, which is exactly why the default model loses to a constant-velocity
+> baseline. The `--motion` flag appends `lat, lon, Δlat, Δlon` to `xnum` (→ 18
+> features), and it is the single biggest driver of forecast skill. See
+> [FINDINGS.md](FINDINGS.md).
+
 ---
 
 ## 2. The module graph
@@ -284,7 +292,23 @@ for s = pred_len-1 … 0:
 
 With `pred_len = 1` the feedback term vanishes and this reduces to the
 single-step case. The whole thing is finite-difference checked at `pred_len = 3`
-in `tests/test_model.c` (`check_model(3)`).
+in `tests/test_model.c`.
+
+**Delta mode (`--delta`, `model_set_delta`).** By default `ŷ_s = fc2(a_s)` is an
+*absolute* coordinate — the model has to reconstruct the whole position every
+step. In delta mode it instead predicts the **displacement**:
+
+```
+ŷ_s = ŷ_{s-1} + fc2(a_s)        # residual: previous coord + learned Δ
+```
+
+with `fc2` **zero-initialised**, so an untrained model outputs Δ = 0 → every
+prediction equals the seed → it *starts at persistence* and only has to learn the
+correction. The backward adds one term: the identity path means the gradient into
+the previous coordinate is `dz[D:D+2] + dŷ_s` (instead of just `dz[D:D+2]`).
+Empirically this both improves accuracy and dramatically reduces variance across
+splits (see [FINDINGS.md](FINDINGS.md) §5). `test_model` gradient-checks both
+modes at `pred_len` 1 and 3.
 
 ### 4.4 Loss — `model_loss`
 

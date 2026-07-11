@@ -181,13 +181,27 @@ result. (See the README's "measured honestly" section for the current answer.)
 number is not trustworthy on its own — quote the distribution, not one draw.
 
 ### Lab D3 — Beat persistence for real
-**Goal:** the honest bar. On held-out storms the compact demo does **not** beat
-persistence; can you?
-**Steps:** try the full config (`--full`), a km-aware loss (weight longitude by
-`cos(lat)`), more/augmented data, or a stronger baseline comparison. Always score
-on the **test** set, never val.
-**Check:** held-out test ΔR below the persistence ΔR **reported on the same test
-storms** — and reproduced across several `--split_seed`s, not one lucky split.
+**Goal:** the honest bar. The *default* model does not beat persistence — find
+out why, and fix it.
+**Steps:** first diagnose (Lab D4). Then compare `--motion` and `--motion
+--delta` against the default, always scoring on the **test** set, never val.
+Confirm the honest bar with `./typhoformer baseline` (constant-velocity ≈ 39 km,
+much stronger than persistence).
+**Check:** `--motion --delta` reaches **~48 km** across splits — 2.5× better than
+persistence and competitive with constant-velocity, from a default that was
+*worse* than persistence. Reproduce across several `--split_seed`s.
+
+### Lab D4 — Find the missing signal
+**Goal:** the diagnosis behind D3 — a lesson in reading the *inputs*, not just the
+model.
+**Files:** `NUMCOL` in `src/data.c`, `dataset_add_motion`.
+**Steps:** list what the model actually receives (intensity + text) and what a
+constant-velocity baseline uses (the last two positions). Notice position and
+velocity are **not** in the model's inputs. Add them with `--motion` and measure.
+**Check:** `--motion` alone moves held-out ΔR ~128 → ~79 km. The takeaway: an
+ablation that says "feature X doesn't help" (Lab D1: text) can mean the whole
+input representation is missing the signal that matters — check that before
+blaming the branch.
 
 ---
 
