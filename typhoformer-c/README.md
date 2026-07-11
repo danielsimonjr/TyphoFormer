@@ -96,6 +96,8 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--lr_decay=` | Per-epoch LR multiplier (1.0 = off). | 1.0 |
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
+| `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
+| `--delta` | Decoder predicts **displacement** from the seed (fc2 zero-init → starts at persistence, learns the correction). | off |
 | `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
 | `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |

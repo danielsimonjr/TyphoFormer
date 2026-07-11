@@ -96,6 +96,8 @@ static int cmd_train(int argc, char **argv) {
     int patience = 0;                 /* 0 = disabled (early stopping) */
     int warmup = 0;                   /* linear LR warmup steps (0 = off)  */
     int no_text = 0;                  /* numbers-only ablation             */
+    int motion = 0;                   /* add position+velocity input features */
+    int delta = 0;                    /* decoder predicts displacement     */
     unsigned long seed = 20260711, split_seed = 42;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     for (int i = 1; i < argc; ++i) {
@@ -121,6 +123,8 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--warmup=", 9))    warmup = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--resume=", 9))    resume = argv[i] + 9;
         else if (!strcmp(argv[i], "--no_text"))        no_text = 1;
+        else if (!strcmp(argv[i], "--motion"))         motion = 1;
+        else if (!strcmp(argv[i], "--delta"))          delta = 1;
         else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
@@ -140,6 +144,8 @@ static int cmd_train(int argc, char **argv) {
 
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin) { c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text; }
+    if (motion) dataset_add_motion(&ds);             /* +lat,lon,dlat,dlon (before standardize) */
+    c.d_num = ds.d_num;
     /* Leakage-safe: split whole STORMS into train/val/test, then fit feature +
      * coordinate normalization on the TRAIN storms only. (The .tfb path has no
      * storm info, so it splits by sample and standardizes itself.) */
@@ -148,11 +154,13 @@ static int cmd_train(int argc, char **argv) {
     dataset_standardize(&ds);
     int *train = sp.train, *val = sp.val, *test = sp.test;
     int ntr = sp.n_train, nva = sp.n_val, nte = sp.n_test;
-    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu%s\n",
-           ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed,
-           no_text ? " | NO-TEXT (numbers only)" : "");
+    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu | d_num=%d%s%s\n",
+           ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed, ds.d_num,
+           motion ? " (+motion)" : "", no_text ? " | NO-TEXT" : "");
+    if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
 
     if (threads < 1) threads = 1;
+    if (delta) model_set_delta(1);                   /* before model_new (zero-inits fc2) */
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     Adam opt = adam_new(&pl, lr, wd);
@@ -262,6 +270,7 @@ static int cmd_eval(int argc, char **argv) {
         else if (!strncmp(argv[i], "--emb=", 6))      emb = argv[i] + 6;
         else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
         else if (!strcmp(argv[i], "--no_text"))       no_text = 1;
+        else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
     }
     Config c = checkpoint_load_config(weights);
     printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d\n",
@@ -270,6 +279,7 @@ static int cmd_eval(int argc, char **argv) {
     if (bin && ds.d_text != c.d_text) { die("d_text mismatch (data %d vs model %d)", ds.d_text, c.d_text); }
 
     ds.no_text = no_text;
+    if (!ds.prewindowed && c.d_num == ds.d_num + 4) dataset_add_motion(&ds);  /* ckpt trained --motion */
     apply_ckpt_stats(&ds, weights);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
@@ -337,6 +347,7 @@ static int cmd_predict(int argc, char **argv) {
     }
     Config c = checkpoint_load_config(weights);
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
+    if (!ds.prewindowed && c.d_num == ds.d_num + 4) dataset_add_motion(&ds);   /* ckpt trained --motion */
     apply_ckpt_stats(&ds, weights);
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);

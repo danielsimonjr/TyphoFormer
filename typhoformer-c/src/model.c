@@ -11,6 +11,11 @@
 
 static const Mat NULLMAT = {0, 0, NULL};
 
+/* Decoder delta mode (predict displacement from the seed). Off by default. */
+static int g_delta = 0;
+void model_set_delta(int on) { g_delta = on; }
+int  model_delta(void) { return g_delta; }
+
 Config config_default(void) {
     Config c;
     c.d_num = 14; c.d_text = 384; c.d_model = 256; c.out_dim = 2;
@@ -168,6 +173,10 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
     d.fc1 = linear_new(c->d_model + c->out_dim, c->d_model, pl, "dec.fc1");
     d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
+    if (g_delta) {                                   /* start at persistence (zero delta) */
+        memset(d.fc2.W.data, 0, (size_t)d.fc2.out * d.fc2.in * sizeof(float));
+        memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
+    }
     d.zc  = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.h1c = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.ac  = (Mat *)calloc(d.max_steps, sizeof(Mat));
@@ -190,7 +199,8 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat
         mat_copy(a, d->h1c[s]); mat_relu(a);
         mat_copy(d->ac[s], a);
         linear_forward(&d->fc2, a, ytn);
-        mat_copy(yt, ytn);
+        if (g_delta) { for (int i = 0; i < O; ++i) yt.data[i] += ytn.data[i]; }  /* y_t = y_{t-1}+Δ */
+        else         mat_copy(yt, ytn);                                          /* y_t = Δ (absolute) */
         memcpy(&preds.data[s * O], yt.data, O * sizeof(float));
     }
 }
@@ -210,7 +220,10 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
         mat_copy(d->fc1.xcache, d->zc[s]);
         linear_backward(&d->fc1, dh1, dz);
         for (int i = 0; i < H; ++i) d->s_dhacc.data[i] += dz.data[i];      /* h feeds every step */
-        for (int i = 0; i < O; ++i) dynext.data[i] = dz.data[H + i];       /* → previous step's y */
+        /* grad into the previous step's y: through fc1's input, plus (delta mode)
+         * the identity path y_t = y_{t-1} + Δ. */
+        for (int i = 0; i < O; ++i)
+            dynext.data[i] = dz.data[H + i] + (g_delta ? dyt.data[i] : 0.0f);
     }
     memcpy(dhenc.data, d->s_dhacc.data, H * sizeof(float));
 }

@@ -217,6 +217,21 @@ static void fit_apply_features(Dataset *d, const char *use) {
     }
 }
 
+void dataset_add_motion(Dataset *d) {
+    if (d->prewindowed) return;                     /* no coord history in .tfb */
+    int old = d->d_num, nd = old + 4;
+    float *nm = (float *)malloc((size_t)d->n_records * nd * sizeof(float));
+    for (int i = 0; i < d->n_records; ++i) {
+        memcpy(&nm[(size_t)i * nd], &d->num[(size_t)i * old], (size_t)old * sizeof(float));
+        int same = (i > 0 && d->gid[i] == d->gid[i - 1]);   /* velocity within a storm */
+        nm[(size_t)i * nd + old + 0] = d->lat[i];
+        nm[(size_t)i * nd + old + 1] = d->lon[i];
+        nm[(size_t)i * nd + old + 2] = same ? d->lat[i] - d->lat[i - 1] : 0.0f;
+        nm[(size_t)i * nd + old + 3] = same ? d->lon[i] - d->lon[i - 1] : 0.0f;
+    }
+    free(d->num); d->num = nm; d->d_num = nd;
+}
+
 void dataset_standardize(Dataset *d) {
     if (d->prewindowed) return;                    /* bin path standardizes itself */
     char *use = (char *)malloc((size_t)d->n_records);
