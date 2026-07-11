@@ -2,4 +2,9 @@
 *.o
 src/*.o
 tests/test_tensor
+tests/test_nn
+tests/test_model
+tests/test_data
+typhoformer
+*.bin
 *.out
