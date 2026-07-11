@@ -60,28 +60,87 @@ than persistence** on this split. Adding 26× the parameters did not close the
 gap — the bottleneck is the **~98-storm dataset**, not model size. (Consistent
 with §1: 158 km sits inside the 95–206 km split-variance band.)
 
-## 4. What this means
+## 4. The diagnosis: the model was blind to motion
 
-- The engineering is sound; the **forecaster is not a clear win over the trivial
-  baseline** on this small sample, and the marquee "language helps" claim does
-  not reproduce here.
-- This is not a failure of the reimplementation — the gradient checks, golden
-  test, and cross-backend agreement all say the math is correct. It is an honest
-  measurement that the *earlier favourable numbers were leakage*, and that this
-  much data (~98 storms) is likely too little for the model to beat persistence
-  robustly, let alone to show a language benefit.
+The honest bar is not persistence (~123 km) — it is **constant-velocity
+extrapolation** (add the last observed velocity), which this repo's own
+`baseline` subcommand puts at **39 km @ 6h**. The default model (§1–3, ~128 km)
+is *3–4× worse than that two-line physics baseline*.
+
+Why? Its inputs (`NUMCOL` in `src/data.c`) are **intensity only** — max wind, min
+pressure, 12 wind-radii columns — plus the text embedding. The storm's
+**position and velocity are never fed to the model**; they are used only to seed
+the decoder and form the targets. So the model is asked to predict *where the
+storm goes* while never being shown *how it is moving*. That is why it loses to
+constant-velocity, and why the language ablation was flat: **neither branch
+carries the motion signal**, so the whole input representation is the bottleneck,
+not the text.
+
+## 5. The fix: feed motion, predict displacement
+
+Two changes, each a CLI flag, tested across the same 5 storm splits (compact
+config, 30 epochs, early stopping):
+
+| model | held-out test ΔR (km) | vs persistence | vs const-velocity |
+|:--|:--:|:--:|:--:|
+| default (intensity + text) | 128.5 ± 41.3 | ~parity | 3–4× worse |
+| **+ `--motion`** (position + velocity inputs) | 79.0 ± 26.8 | beats it | ~2× worse |
+| **+ `--motion --delta`** (predict displacement) | **48.1 ± 2.7** | **2.5× better** | competitive (39) |
+
+- **`--motion`** (add `lat, lon, Δlat, Δlon` to the inputs) is the dominant fix:
+  it hands the model the signal constant-velocity already uses. Mean ΔR 128 → 79.
+- **`--delta`** (decoder predicts the displacement from the seed, `fc2`
+  zero-initialised so it *starts* at persistence) roughly halves the error again
+  and — just as important — **collapses the variance** (std 27 → 3 km): every
+  split now lands in 44–53 km. Starting from a sensible prior and learning the
+  correction is far more stable than regressing absolute coordinates.
+
+The fixed model (**48 km**) is **2.5× better than persistence** and finally
+**competitive with the constant-velocity baseline (~39 km)** — from a starting
+point of being several times worse than a two-line heuristic.
+
+## 6. Even with a working model, the language branch still does not help
+
+Repeating the `--no_text` ablation on the *fixed* model, across all 5 splits:
+
+| fixed model | held-out test ΔR (km) |
+|:--|:--:|
+| `--motion --delta` **with** text | 48.1 ± 2.7 |
+| `--motion --delta` **without** text (`--no_text`) | **46.5 ± 3.9** |
+
+Numbers-only is again **marginally better** (~1.6 km). This is now a robust
+result — five splits, and a model that actually forecasts well — and it still
+says the GPT-4o/MiniLM language branch, the paper's central premise, provides no
+benefit on this data. If anything it adds a little noise.
+
+## 7. What this means
+
+- The engineering was always sound (gradient checks, golden, cross-backend
+  agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
+  motion — and fixing it moved held-out ΔR from ~128 km to **48 km**, turning a
+  sub-persistence model into one that beats persistence 2.5× and rivals
+  constant-velocity.
+- The **language branch does not earn its keep** here, before or after the fix.
+  Whether it would on a larger, harder dataset (rapid intensification, recurvature,
+  extratropical transition — where text might carry signal the numbers don't) is
+  the honest open question.
+- Remaining gap to constant-velocity (~48 vs ~39): a km-aware loss (`--km_loss`,
+  which down-weights longitude error by cos²(lat)) was **tested and did not help**
+  — it was slightly *worse* on the splits tried, so coordinate normalization
+  already balances the axes well enough. The more promising levers are longer
+  horizons (where curvature should let a learned model finally pass
+  constant-velocity) and — the ceiling on everything — **more than 98 storms**.
 
 ## Reproduce
 
 ```sh
-# split variance
-for s in 1 2 3 4 5; do ./typhoformer train 25 --patience=8 --split_seed=$s; done
-# text ablation
-./typhoformer train 25 --patience=8 --split_seed=42            # with text
-./typhoformer train 25 --patience=8 --split_seed=42 --no_text  # numbers only
+# the fix, across splits
+for s in 1 2 3 4 5; do ./typhoformer train 30 --patience=8 --motion --delta --split_seed=$s; done
+# does text help the fixed model?
+./typhoformer train 30 --patience=8 --motion --delta --split_seed=42            # with text
+./typhoformer train 30 --patience=8 --motion --delta --split_seed=42 --no_text  # numbers only
+# the honest baseline the model must beat
+./typhoformer baseline --pred_len=4
 ```
 
-(See [LABS.md](LABS.md) Track D for these as guided exercises.) The full paper
-config was tried (§3) and does not change the verdict. A km-aware loss and — most
-importantly — **more data** are the remaining levers; on ~98 storms, no amount of
-model capacity made this beat persistence.
+(See [LABS.md](LABS.md) Track D for these as guided exercises.)

@@ -240,19 +240,23 @@ floor). But the more important question is whether it *forecasts* — see
 [docs/FINDINGS.md](docs/FINDINGS.md). On the **held-out test storms** (never seen
 in training or selection), varying only the storm split:
 
-| what | params | held-out test ΔR | persistence |
-|:--|:--:|:--:|:--:|
-| model, 5 different splits | 198 K | **128.5 ± 41.3 km** (min 95, max 206) | 123.5 km |
-| **numbers-only** (`--no_text`, split 42) | 198 K | **156.0 km** | 102.7 km |
-| with-text (compact, split 42) | 198 K | 172.9 km | 102.7 km |
-| with-text (**full config**, split 42) | 5.1 M | 158.0 km | 102.7 km |
+Held-out test ΔR across 5 storm splits (compact config). The honest bar is
+**constant-velocity extrapolation (~39 km @ 6h)**, not persistence (~123 km):
 
-Three honest conclusions: the model is at **rough parity with persistence** (the
-±41 km split noise dwarfs the ~5 km gap); the **language branch does not help**
-here — numbers-only is ~17 km *better* on the tested split, contradicting the
-paper's premise on this data; and **26× more parameters** (the full paper config)
-does **not** close the gap, so the bottleneck is the ~98-storm dataset, not model
-size.
+| model | held-out test ΔR | vs persistence |
+|:--|:--:|:--:|
+| default (intensity + text) | 128.5 ± 41.3 km | ~parity |
+| **`--motion`** (feed position + velocity) | 79.0 ± 26.8 km | beats it |
+| **`--motion --delta`** (predict displacement) | **48.1 ± 2.7 km** | **2.5× better** |
+| `--motion --delta --no_text` (numbers only) | 46.5 ± 3.9 km | 2.6× better |
+
+The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
+default model was **blind to motion** (its inputs are intensity + text; position
+and velocity were never fed in), so it lost to a two-line physics baseline.
+Feeding motion and predicting displacement takes held-out ΔR from **128 km → 48
+km** — 2.5× better than persistence and competitive with constant-velocity. And
+the **language branch still doesn't help** even with a working model
+(numbers-only is marginally *better*), a robust negative result on this data.
 
 > **Honesty note.** Earlier versions reported ΔR ≈ 79 km "beating persistence."
 > That was data leakage — normalization fit on the whole dataset and overlapping

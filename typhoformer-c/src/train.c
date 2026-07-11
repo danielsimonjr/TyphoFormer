@@ -98,6 +98,7 @@ static int cmd_train(int argc, char **argv) {
     int no_text = 0;                  /* numbers-only ablation             */
     int motion = 0;                   /* add position+velocity input features */
     int delta = 0;                    /* decoder predicts displacement     */
+    int km_loss = 0;                  /* weight longitude error by cos^2(lat) */
     unsigned long seed = 20260711, split_seed = 42;
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     for (int i = 1; i < argc; ++i) {
@@ -125,6 +126,7 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no_text"))        no_text = 1;
         else if (!strcmp(argv[i], "--motion"))         motion = 1;
         else if (!strcmp(argv[i], "--delta"))          delta = 1;
+        else if (!strcmp(argv[i], "--km_loss"))        km_loss = 1;
         else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);
@@ -158,6 +160,7 @@ static int cmd_train(int argc, char **argv) {
            ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed, ds.d_num,
            motion ? " (+motion)" : "", no_text ? " | NO-TEXT" : "");
     if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
+    if (km_loss && threads > 1) printf("note: --km_loss applies on the serial path; use --threads=1\n");
 
     if (threads < 1) threads = 1;
     if (delta) model_set_delta(1);                   /* before model_new (zero-inits fc2) */
@@ -203,6 +206,11 @@ static int cmd_train(int argc, char **argv) {
                     dataset_get(&ds, train[b + k], xn, xt, yp, Y);
                     model_forward(&m, xn, xt, yp);
                     bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
+                    if (km_loss) {                       /* equirectangular: down-weight lon by cos^2(lat) */
+                        float latd = yp.data[0] * ds.cstd[0] + ds.cmean[0];
+                        float w = cosf(latd * (float)(PI_ / 180.0)); w *= w;
+                        for (int h = 0; h < c.pred_len; ++h) dpred.data[h * 2 + 1] *= w;
+                    }
                     for (int i = 0; i < c.pred_len * c.out_dim; ++i) dpred.data[i] /= bs;
                     for (int i = 0; i < c.in_len * c.d_model; ++i)  dgate.data[i] /= bs;
                     model_backward(&m, dpred, dgate);
