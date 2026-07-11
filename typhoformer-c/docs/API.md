@@ -59,8 +59,17 @@ program. Read the **Memory model**, **Ownership & lifetime**, and
   RNG (`nn_seed`/`nn_uniform`), which is only touched during construction and
   shuffling. Seed and build models on one thread, then run them on their own
   threads.
+- **Multicore training uses exactly this pattern.** `ParTrainer`
+  ([`parallel.h`](../include/parallel.h)) owns N replica `Model`s, hands each
+  worker its own instance and scratch, and only touches the shared master
+  `ParamList` *before* dispatch (broadcast) and *after* join (reduce) — never
+  concurrently. So there are no locks and no data races (ThreadSanitizer-clean).
+  Because the RNG is only used at construction/shuffle time on the main thread,
+  the parallel region touches it not at all.
 - **Determinism.** With a fixed `nn_seed`, initialization, shuffling, and the
   whole run are reproducible. There is no wall-clock or `rand()` dependence.
+  Multicore reduction reorders floating-point sums, so `--threads>1` matches the
+  serial result to ≈1e-7 rather than bit-for-bit; `--threads=1` is exact.
 - **Fatal errors.** Unrecoverable I/O/format problems call `die()` (prints to
   `stderr`, `exit(1)`). Library users who cannot tolerate `exit` should validate
   inputs (file existence, header magic) before calling the loaders.

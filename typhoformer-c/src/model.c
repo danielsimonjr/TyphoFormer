@@ -159,44 +159,62 @@ void encoder_free(Encoder *e) {
  * Decoder (autoregressive; training uses steps == 1)
  * ===================================================================== */
 Decoder decoder_new(const Config *c, ParamList *pl) {
-    Decoder d; d.hidden = c->d_model; d.out = c->out_dim;
+    Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
     d.fc1 = linear_new(c->d_model + c->out_dim, c->d_model, pl, "dec.fc1");
     d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
-    d.z = NULLMAT; d.h1 = NULLMAT;
+    d.zc  = (Mat *)calloc(d.max_steps, sizeof(Mat));
+    d.h1c = (Mat *)calloc(d.max_steps, sizeof(Mat));
+    d.ac  = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.s_yt = NULLMAT; d.s_a = NULLMAT; d.s_ytn = NULLMAT;
     d.s_da = NULLMAT; d.s_dh1 = NULLMAT; d.s_dz = NULLMAT;
+    d.s_dyt = NULLMAT; d.s_dynext = NULLMAT; d.s_dhacc = NULLMAT;
     return d;
 }
 void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
-    ensure(&d->z, 1, H + O); ensure(&d->h1, 1, H);
+    assert(steps <= d->max_steps);
     ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O);
     Mat yt = d->s_yt, a = d->s_a, ytn = d->s_ytn;
     mat_copy(yt, yprev);
     for (int s = 0; s < steps; ++s) {
-        memcpy(&d->z.data[0], henc.data, H * sizeof(float));
-        memcpy(&d->z.data[H], yt.data, O * sizeof(float));
-        linear_forward(&d->fc1, d->z, d->h1);
-        mat_copy(a, d->h1); mat_relu(a);
+        ensure(&d->zc[s], 1, H + O); ensure(&d->h1c[s], 1, H); ensure(&d->ac[s], 1, H);
+        memcpy(&d->zc[s].data[0], henc.data, H * sizeof(float));   /* z = [h ; y_prev] */
+        memcpy(&d->zc[s].data[H], yt.data, O * sizeof(float));
+        linear_forward(&d->fc1, d->zc[s], d->h1c[s]);
+        mat_copy(a, d->h1c[s]); mat_relu(a);
+        mat_copy(d->ac[s], a);
         linear_forward(&d->fc2, a, ytn);
         mat_copy(yt, ytn);
         memcpy(&preds.data[s * O], yt.data, O * sizeof(float));
     }
 }
+/* Autoregressive backward: y_t is used both as this step's output and as the
+ * next step's decoder input, so gradients from step s+1 flow back into it. */
 void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
-    const int H = d->hidden, O = d->out;
-    assert(dpreds.rows == 1);                         /* single-step training */
+    const int H = d->hidden, O = d->out, steps = dpreds.rows;
     ensure(&d->s_da, 1, H); ensure(&d->s_dh1, 1, H); ensure(&d->s_dz, 1, H + O);
-    Mat da = d->s_da, dh1 = d->s_dh1, dz = d->s_dz;
-    linear_backward(&d->fc2, dpreds, da);
-    for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1.data[i] > 0.0f) ? da.data[i] : 0.0f;
-    linear_backward(&d->fc1, dh1, dz);
-    memcpy(dhenc.data, &dz.data[0], H * sizeof(float));   /* grad wrt henc */
+    ensure(&d->s_dyt, 1, O); ensure(&d->s_dynext, 1, O); ensure(&d->s_dhacc, 1, H);
+    Mat da = d->s_da, dh1 = d->s_dh1, dz = d->s_dz, dyt = d->s_dyt, dynext = d->s_dynext;
+    mat_zero(d->s_dhacc); mat_zero(dynext);
+    for (int s = steps - 1; s >= 0; --s) {
+        for (int i = 0; i < O; ++i) dyt.data[i] = dpreds.data[s * O + i] + dynext.data[i];
+        mat_copy(d->fc2.xcache, d->ac[s]);            /* restore this step's caches */
+        linear_backward(&d->fc2, dyt, da);
+        for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[s].data[i] > 0.0f) ? da.data[i] : 0.0f;
+        mat_copy(d->fc1.xcache, d->zc[s]);
+        linear_backward(&d->fc1, dh1, dz);
+        for (int i = 0; i < H; ++i) d->s_dhacc.data[i] += dz.data[i];      /* h feeds every step */
+        for (int i = 0; i < O; ++i) dynext.data[i] = dz.data[H + i];       /* → previous step's y */
+    }
+    memcpy(dhenc.data, d->s_dhacc.data, H * sizeof(float));
 }
 void decoder_free(Decoder *d) {
-    linear_free(&d->fc1); linear_free(&d->fc2); mat_free(&d->z); mat_free(&d->h1);
+    linear_free(&d->fc1); linear_free(&d->fc2);
+    for (int s = 0; s < d->max_steps; ++s) { mat_free(&d->zc[s]); mat_free(&d->h1c[s]); mat_free(&d->ac[s]); }
+    free(d->zc); free(d->h1c); free(d->ac);
     mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn);
     mat_free(&d->s_da); mat_free(&d->s_dh1); mat_free(&d->s_dz);
+    mat_free(&d->s_dyt); mat_free(&d->s_dynext); mat_free(&d->s_dhacc);
 }
 
 /* =====================================================================
