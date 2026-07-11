@@ -20,6 +20,7 @@
 - [🧠 Method](#-method)
 - [📊 Results](#-results)
 - [🚀 Quick Start](#-quick-start)
+- [⚡ Pure-C Implementation](#-pure-c-implementation)
 - [📁 Repository Structure](#-repository-structure)
 - [🧩 Data Preparation](#-data-preparation)
 - [🔧 Configuration](#-configuration)
@@ -34,6 +35,7 @@
 - **🧭 Spatio-temporal Transformer backbone.** Alternating temporal / spatial self-attention followed by an autoregressive decoding head that rolls out future coordinates.
 - **🏅 State of the art on HURDAT2.** Lowest MAE **and** spherical-distance error at all 6 / 12 / 18 / 24-hour horizons, with the smallest long-horizon degradation among all baselines.
 - **📦 Reproducible out of the box.** Ships 5 years of HURDAT2 records, the GPT-4o prompts, and the MiniLM embeddings — so you can train and evaluate immediately.
+- **⚡ Dependency-free pure-C port.** A from-scratch C implementation ([`typhoformer-c/`](typhoformer-c/)) trains and runs with **zero dependencies** (standard library + `libm` only) — no PyTorch, no BLAS — for a lightweight, portable, MIT-licensed build.
 
 ## 🧠 Method
 
@@ -222,6 +224,25 @@ python eval_typhoformer.py
 | `transformers` | — | tokenizer / encoder backend |
 | `openai`, `backoff` | — | GPT-4o prompt generation (optional; only to regenerate text) |
 
+## ⚡ Pure-C Implementation
+
+For a lightweight, portable build with **no machine-learning stack to install**, TyphoFormer is also reimplemented from scratch in **pure C (standard library only)** under [`typhoformer-c/`](typhoformer-c/) — a clean-room port written from the algorithm spec above. It covers the entire pipeline: Prompt-aware Gating Fusion, the spatio-temporal Transformer encoder, and the autoregressive decoder, with hand-written **forward *and* backward** passes, an Adam optimizer, the CSV / `.npy` data loader, and training + evaluation. It links only against `libm` — no PyTorch, no BLAS, no third-party code.
+
+- **🧩 Self-contained.** Builds with any C11 compiler (`gcc`/`clang`) and `make` — nothing to `pip install`.
+- **⚙️ Optimized math.** Hand-written, **cache-blocked** matrix multiplies (`ikj` / `pij` loop orders) compiled at `-O3` — ≈ 6 s/epoch for the compact demo config and ≈ 190 s/epoch for the full 5.1 M-parameter paper config, single-threaded on CPU.
+- **✅ Correctness-checked.** Every layer is validated by finite-difference gradient checks (tensor core, a full transformer block, and the whole model) — all at the single-precision noise floor.
+- **📈 Trains end to end.** On the bundled data it converges and beats a persistence baseline (validation ΔR **79 km** vs **126 km** after 30 epochs).
+- **📜 MIT-licensed.** The port is original clean-room code, so it carries its own permissive license ([`typhoformer-c/LICENSE`](typhoformer-c/LICENSE)).
+
+```bash
+cd typhoformer-c
+make test                 # gradient checks + data-loader smoke test
+make && ./typhoformer 30  # train (compact config) on the bundled data
+./typhoformer 5 --full    # full paper configuration (d_model=256, 3 layers)
+```
+
+See [`typhoformer-c/README.md`](typhoformer-c/README.md) for the build details, the `.npy` → `.tfb` data converter, and all CLI flags.
+
 ## 📁 Repository Structure
 
 ```bash
@@ -241,6 +262,10 @@ TyphoFormer/
 │   └── ... emb_chunk_006.npy
 │
 ├── assets/                    # Figures (results, algorithm diagrams, demo GIF)
+├── typhoformer-c/             # Dependency-free pure-C reimplementation (MIT)
+│   ├── src/ include/ tests/   # tensor core, NN layers, model, data, training
+│   ├── tools/                 # .npy-dict → .tfb data converter
+│   └── Makefile               # `make test` / `make && ./typhoformer`
 ├── HURDAT_2new_3000.csv       # Raw typhoon records (2020–2024 sample)
 ├── generate_text_description_new.py   # GPT-4o language-description generation
 ├── generate_text_embeddings.py        # MiniLM (all-MiniLM-L6-v2) embedding generation
