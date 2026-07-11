@@ -5,6 +5,7 @@
  */
 #include "checkpoint.h"
 #include "model.h"
+#include "optim.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -60,6 +61,31 @@ int main(void) {
         if (fabsf(rmean[i] - mean[i]) > 0 || fabsf(rstd[i] - std[i]) > 0) {
             printf("FAIL: stats[%d] mismatch\n", i); fail = 1; break;
         }
+
+    /* ---- TFW3: coordinate stats round-trip ---- */
+    float cmean[2] = { 25.5f, -70.25f }, cstd[2] = { 8.0f, 12.5f };
+    checkpoint_save3(CKPT, c, mean, std, c.d_num, cmean, cstd, &pl);
+    float rcm[2], rcs[2];
+    int hc = checkpoint_load_coord_stats(CKPT, rcm, rcs);
+    if (!hc || rcm[0] != cmean[0] || rcm[1] != cmean[1] || rcs[0] != cstd[0] || rcs[1] != cstd[1]) {
+        printf("FAIL: coord stats round-trip\n"); fail = 1;
+    }
+    if (checkpoint_load_stats(CKPT, rmean, rstd) != c.d_num) { printf("FAIL: TFW3 feat stats\n"); fail = 1; }
+    { ParamList q; plist_init(&q); Model mq = model_new(&c, &q);
+      checkpoint_load_params(CKPT, &q);         /* params load past both stat blocks */
+      model_free(&mq); plist_free(&q); }
+
+    /* ---- optimizer-state sidecar round-trip ---- */
+    Adam opt = adam_new(&pl, 1e-3f, 1e-5f);
+    for (long i = 0; i < opt.n; ++i) { opt.fm[i] = 0.5f * i; opt.sm[i] = 0.25f * i; }
+    opt.t = 42; opt.lr = 7e-4f;
+    checkpoint_save_optim("._test_ckpt.opt", &opt, 9);
+    Adam opt2 = adam_new(&pl, 1e-3f, 1e-5f); int rep = 0;
+    if (!checkpoint_load_optim("._test_ckpt.opt", &opt2, &rep)) { printf("FAIL: optim load\n"); fail = 1; }
+    if (opt2.t != 42 || rep != 9 || fabsf(opt2.lr - 7e-4f) > 0) { printf("FAIL: optim scalars\n"); fail = 1; }
+    for (long i = 0; i < opt.n; ++i)
+        if (opt2.fm[i] != opt.fm[i] || opt2.sm[i] != opt.sm[i]) { printf("FAIL: optim moments\n"); fail = 1; break; }
+    adam_free(&opt); adam_free(&opt2); remove("._test_ckpt.opt");
 
     /* ---- TFW1: legacy, no stats block ---- */
     checkpoint_save(CKPT, c, &pl);

@@ -87,15 +87,48 @@ Code: `tests/test_*.c`.
 coordinates, plus a gate penalty `λ·mean(relu(0.6−g)²)` that discourages the gate
 from collapsing. Code: `model_loss`, `src/model.c`.
 
-**Adam** — an adaptive optimizer keeping per-parameter first/second-moment
-estimates (`m`, `v`) with bias correction; combined here with decoupled weight
-decay. Code: `Adam`, `src/optim.c`.
+**AdamW** — an adaptive optimizer keeping per-parameter first/second-moment
+estimates (`m`, `v`) with bias correction, using **decoupled** weight decay (the
+decay acts on the weight directly, not through the gradient). Code: `Adam`,
+`src/optim.c`.
 
-**Weight decay** — an L2-style pull of weights toward zero; regularization.
+**Weight decay (decoupled)** — an L2-style pull of weights toward zero for
+regularization; "decoupled" (AdamW) means it is applied separately from the
+adaptive gradient term.
 
-**Learning rate (lr) / LR schedule** — the step size; `--lr_decay` multiplies it
-each epoch. **Early stopping** halts when validation stops improving
-(`--patience`).
+**Gradient clipping** — rescaling all gradients so their global L2 norm does not
+exceed a cap (`--clip`), preventing a single large step from destabilizing
+training. Code: `plist_clip_grad_norm`, `src/nn.c`.
+
+**Dropout** — during training, randomly zeroing a fraction `p` of activations
+(and scaling the rest by `1/(1-p)`) so the model can't over-rely on any unit;
+disabled at eval. Applied after attention and after the FFN in each block.
+Code: `dropout_apply`, `src/nn.c`.
+
+**Learning rate (lr) / schedule** — the step size. **Warmup** (`--warmup`) ramps
+it up linearly over the first N steps; **decay** (`--lr_decay`) multiplies it each
+epoch. **Early stopping** halts when validation stops improving (`--patience`).
+
+**Data leakage** — when information from validation/test data influences training
+(e.g. normalization fit on the whole dataset, or overlapping windows split across
+sets). It makes reported metrics look better than real generalization. Avoided
+here by storm-level splitting and train-only statistics.
+
+**Storm-level split** — assigning whole storms (not individual sliding windows)
+to train/val/test, so overlapping windows from one storm never straddle two
+sets. Code: `dataset_split3`, `src/data.c`.
+
+**Held-out test set** — a partition never used for training *or* model
+selection; the honest generalization estimate. Distinct from the validation set
+used for early stopping / checkpoint selection.
+
+**Coordinate normalization** — z-scoring the target lat/lon (with train-only
+stats) so the regression targets are unit-scaled and balanced; predictions are
+de-normalized back to degrees for metrics. Code: `dataset_denorm`, `src/data.c`.
+
+**Resume** — continuing an interrupted training run from a checkpoint plus its
+`.opt` sidecar (Adam moments + step + lr), so the optimizer state is restored
+rather than restarted. Code: `checkpoint_save_optim`, `--resume`.
 
 **Epoch / minibatch / batch size** — one epoch = one pass over the training set;
 a minibatch is a small group of samples whose gradients are averaged before one

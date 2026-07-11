@@ -103,7 +103,7 @@ metric `|g_num − g_ana| / (|g_num| + |g_ana| + 1e-2)` and an absolute floor of
 |:--|:--|
 | **Multi-step decoding** (`pred_len > 1`) | Already implemented: `decoder_forward` caches per-step `z`/`h1`/`a`, and `decoder_backward` runs from the last step to the first, feeding `dz[D:D+2]` back into the previous step's output gradient (the autoregressive feedback). `tests/test_model` gradient-checks it at `pred_len=3`. Read it as the reference for any recurrent backprop. |
 | **Pre-norm blocks** | reorder `block_forward` to `y = x + MHA(LN1(x))` etc.; mirror the residual/LN order in `block_backward`. |
-| **Dropout** | add a cached 0/1 mask in forward (scaled by `1/(1-p)`), multiply by it in backward; disable at eval with a flag. Seed via `nn_uniform`. |
+| **Dropout** | *Implemented* — see `dropout_apply` in `src/nn.c` and the block's `drop1`/`drop2` masks. A cached 0/(1/(1-p)) mask in forward, multiplied into the gradient in backward, gated by `nn_set_training`. Model your own stochastic layer on it. |
 | **Learned positional encoding** | add a `[T,D]` parameter to the encoder, `+=` it after `input_proj`, register it, and add its (identity) gradient in backward. |
 | **New numerical features** | change `NUMCOL`/`d_num` in `data.c` and `Config.d_num`; retrain (the checkpoint config guards against loading a mismatched model). |
 | **Bigger/smaller model** | just change `Config` fields — the whole graph is config-driven. |
