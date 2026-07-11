@@ -12,6 +12,7 @@
 #include "optim.h"
 
 #include <math.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,9 +244,128 @@ static int cmd_prepare(int argc, char **argv) {
     return 0;
 }
 
+/* ---- predict (write predicted vs. true tracks to CSV) --------------- */
+static int cmd_predict(int argc, char **argv) {
+    const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *weights = DEF_CKPT, *out = "predictions.csv";
+    int limit = -1;
+    for (int i = 1; i < argc; ++i) {
+        if      (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;
+        else if (!strncmp(argv[i], "--csv=", 6))      csv = argv[i] + 6;
+        else if (!strncmp(argv[i], "--emb=", 6))      emb = argv[i] + 6;
+        else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
+        else if (!strncmp(argv[i], "--out=", 6))      out = argv[i] + 6;
+        else if (!strncmp(argv[i], "--n=", 4))        limit = atoi(argv[i] + 4);
+    }
+    Config c = checkpoint_load_config(weights);
+    Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
+    ParamList pl; plist_init(&pl);
+    Model m = model_new(&c, &pl);
+    checkpoint_load_params(weights, &pl);
+    int n = (limit > 0 && limit < ds.n_samples) ? limit : ds.n_samples;
+    FILE *f = fopen(out, "w");
+    if (!f) { fprintf(stderr, "cannot write %s\n", out); return 1; }
+    fprintf(f, "sample,horizon_h,seed_lat,seed_lon,true_lat,true_lon,pred_lat,pred_lon,error_km,persistence_km\n");
+    Mat xn = mat_new(c.in_len, c.d_num), xt = mat_new(c.in_len, c.d_text), yp = mat_new(1, 2), Y = mat_new(c.pred_len, 2);
+    for (int s = 0; s < n; ++s) {
+        dataset_get(&ds, s, xn, xt, yp, Y);
+        model_forward(&m, xn, xt, yp);
+        for (int h = 0; h < c.pred_len; ++h) {
+            float pl_lat = m.pred.data[h * 2], pl_lon = m.pred.data[h * 2 + 1];
+            float t_lat = Y.data[h * 2], t_lon = Y.data[h * 2 + 1];
+            fprintf(f, "%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f\n",
+                    s, (h + 1) * 6, yp.data[0], yp.data[1], t_lat, t_lon, pl_lat, pl_lon,
+                    haversine(pl_lat, pl_lon, t_lat, t_lon),
+                    haversine(yp.data[0], yp.data[1], t_lat, t_lon));
+        }
+    }
+    fclose(f);
+    printf("wrote %s: %d samples x %d horizon(s)\n", out, n, c.pred_len);
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y);
+    model_free(&m); plist_free(&pl); dataset_free(&ds);
+    return 0;
+}
+
+/* ---- baseline (persistence + constant-velocity / CLIPER-style) ------ */
+static int cmd_baseline(int argc, char **argv) {
+    const char *csv = DEF_CSV, *emb = DEF_EMB;
+    int in_len = 12, pred_len = 4;
+    for (int i = 1; i < argc; ++i) {
+        if      (!strncmp(argv[i], "--csv=", 6))       csv = argv[i] + 6;
+        else if (!strncmp(argv[i], "--emb=", 6))       emb = argv[i] + 6;
+        else if (!strncmp(argv[i], "--pred_len=", 11)) pred_len = atoi(argv[i] + 11);
+    }
+    Dataset ds = dataset_load(csv, emb, in_len, pred_len);   /* needs coordinate history */
+    int H = pred_len < MAXH ? pred_len : MAXH;
+    double pkm[MAXH] = {0}, vkm[MAXH] = {0};
+    for (int s = 0; s < ds.n_samples; ++s) {
+        int last = ds.start[s] + in_len - 1;
+        float vlat = ds.lat[last] - ds.lat[last - 1], vlon = ds.lon[last] - ds.lon[last - 1];
+        for (int h = 0; h < H; ++h) {
+            float t_lat = ds.lat[last + 1 + h], t_lon = ds.lon[last + 1 + h];
+            pkm[h] += haversine(ds.lat[last], ds.lon[last], t_lat, t_lon);
+            vkm[h] += haversine(ds.lat[last] + (h + 1) * vlat, ds.lon[last] + (h + 1) * vlon, t_lat, t_lon);
+        }
+    }
+    printf("baselines on %d samples (ΔR km):\n", ds.n_samples);
+    printf("  horizon | persistence | const-velocity (CLIPER-style)\n");
+    for (int h = 0; h < H; ++h)
+        printf("   %2dh    |   %7.2f   |   %7.2f\n", (h + 1) * 6, pkm[h] / ds.n_samples, vkm[h] / ds.n_samples);
+    dataset_free(&ds);
+    return 0;
+}
+
+/* ---- bench (forward / forward+backward throughput) ------------------ */
+static int cmd_bench(int argc, char **argv) {
+    int full = 0, iters = 200, d_model = -1, d_ff = -1, n_layers = -1, pred_len = -1;
+    for (int i = 1; i < argc; ++i) {
+        if      (!strcmp(argv[i], "--full"))           full = 1;
+        else if (!strncmp(argv[i], "--iters=", 8))     iters = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--d_model=", 10))  d_model = atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--d_ff=", 7))      d_ff = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--n_layers=", 11)) n_layers = atoi(argv[i] + 11);
+        else if (!strncmp(argv[i], "--pred_len=", 11)) pred_len = atoi(argv[i] + 11);
+    }
+    nn_seed(1);
+    Config c = config_default();
+    if (!full) { c.d_model = 64; c.d_ff = 128; c.n_layers = 2; }
+    if (d_model  > 0) c.d_model  = d_model;
+    if (d_ff     > 0) c.d_ff     = d_ff;
+    if (n_layers > 0) c.n_layers = n_layers;
+    if (pred_len > 0) c.pred_len = pred_len;
+    ParamList pl; plist_init(&pl);
+    Model m = model_new(&c, &pl);
+    Mat xn = mat_new(c.in_len, c.d_num), xt = mat_new(c.in_len, c.d_text), yp = mat_new(1, 2), Y = mat_new(c.pred_len, 2);
+    for (int i = 0; i < c.in_len * c.d_num;  ++i) xn.data[i] = nn_uniform(-1, 1);
+    for (int i = 0; i < c.in_len * c.d_text; ++i) xt.data[i] = nn_uniform(-1, 1);
+    Mat dpred = mat_new(c.pred_len, c.out_dim), dgate = mat_new(c.in_len, c.d_model);
+
+    for (int i = 0; i < 5; ++i) model_forward(&m, xn, xt, yp);            /* warmup */
+    clock_t t0 = clock();
+    for (int i = 0; i < iters; ++i) model_forward(&m, xn, xt, yp);
+    double fwd = (double)(clock() - t0) / CLOCKS_PER_SEC / iters;
+    t0 = clock();
+    for (int i = 0; i < iters; ++i) {
+        model_forward(&m, xn, xt, yp);
+        model_loss(m.pred, Y, m.pgf.gate, 0.1f, dpred, dgate);
+        model_backward(&m, dpred, dgate);
+    }
+    double fb = (double)(clock() - t0) / CLOCKS_PER_SEC / iters;
+
+    printf("bench | d_model=%d d_ff=%d layers=%d heads=%d pred_len=%d | %ld params\n",
+           c.d_model, c.d_ff, c.n_layers, c.n_heads, c.pred_len, plist_num_params(&pl));
+    printf("  forward         : %8.3f ms/sample  (%8.1f samples/s)\n", fwd * 1e3, 1.0 / fwd);
+    printf("  forward+backward: %8.3f ms/sample  (%8.1f samples/s)\n", fb * 1e3, 1.0 / fb);
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
+    model_free(&m); plist_free(&pl);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc > 1 && !strcmp(argv[1], "eval"))    return cmd_eval(argc - 1, argv + 1);
-    if (argc > 1 && !strcmp(argv[1], "prepare")) return cmd_prepare(argc - 1, argv + 1);
-    if (argc > 1 && !strcmp(argv[1], "train"))   return cmd_train(argc - 1, argv + 1);
+    if (argc > 1 && !strcmp(argv[1], "eval"))     return cmd_eval(argc - 1, argv + 1);
+    if (argc > 1 && !strcmp(argv[1], "prepare"))  return cmd_prepare(argc - 1, argv + 1);
+    if (argc > 1 && !strcmp(argv[1], "predict"))  return cmd_predict(argc - 1, argv + 1);
+    if (argc > 1 && !strcmp(argv[1], "baseline")) return cmd_baseline(argc - 1, argv + 1);
+    if (argc > 1 && !strcmp(argv[1], "bench"))    return cmd_bench(argc - 1, argv + 1);
+    if (argc > 1 && !strcmp(argv[1], "train"))    return cmd_train(argc - 1, argv + 1);
     return cmd_train(argc, argv);   /* default / backward compatible */
 }
