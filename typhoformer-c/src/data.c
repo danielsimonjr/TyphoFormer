@@ -1,17 +1,62 @@
 /*
  * data.c — CSV + .npy loading and sliding-window dataset construction.
  */
-#define _DEFAULT_SOURCE      /* scandir, alphasort, strsep, dirent */
+#define _DEFAULT_SOURCE      /* scandir, alphasort, dirent (POSIX) */
 #define _POSIX_C_SOURCE 200809L
 #include "data.h"
 
 #include <assert.h>
 #include <ctype.h>
-#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Portable helpers: no strdup/strsep/scandir dependency in the public path so
+ * the loader builds on POSIX and (via the Win32 branch below) on Windows. */
+static char *dupstr(const char *s) {
+    size_t n = strlen(s) + 1; char *d = (char *)malloc(n);
+    if (d) memcpy(d, s, n);
+    return d;
+}
+
+#ifdef _WIN32
+#include <windows.h>
+static int cmp_str(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+/* List emb_chunk_*.npy in `dir`, sorted by name. Returns count; *out is a
+ * malloc'd array of malloc'd names (caller frees). Untested on Windows. */
+static int list_emb_chunks(const char *dir, char ***out) {
+    char pat[1024]; snprintf(pat, sizeof pat, "%s\\emb_chunk_*.npy", dir);
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat, &fd);
+    *out = NULL;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    char **names = NULL; int n = 0, cap = 0;
+    do {
+        if (n == cap) { cap = cap ? cap * 2 : 16; names = (char **)realloc(names, (size_t)cap * sizeof(char *)); }
+        names[n++] = dupstr(fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    qsort(names, (size_t)n, sizeof(char *), cmp_str);
+    *out = names; return n;
+}
+#else
+#include <dirent.h>
+static int emb_name_filter(const struct dirent *e) {
+    return strncmp(e->d_name, "emb_chunk_", 10) == 0 &&
+           strstr(e->d_name, ".npy") != NULL;
+}
+static int list_emb_chunks(const char *dir, char ***out) {
+    struct dirent **ents; int nc = scandir(dir, &ents, emb_name_filter, alphasort);
+    *out = NULL;
+    if (nc <= 0) return 0;
+    char **names = (char **)malloc((size_t)nc * sizeof(char *));
+    for (int i = 0; i < nc; ++i) { names[i] = dupstr(ents[i]->d_name); free(ents[i]); }
+    free(ents);
+    *out = names; return nc;
+}
+#endif
 
 /* ---- .npy (v1.0/2.0) 2-D float32 loader ----------------------------- */
 float *npy_load_2d(const char *path, int *rows, int *cols) {
@@ -27,10 +72,26 @@ float *npy_load_2d(const char *path, int *rows, int *cols) {
     char *hdr = (char *)malloc(hlen + 1);
     if (fread(hdr, 1, hlen, f) != hlen) die("%s: unexpected end of file", path);
     hdr[hlen] = 0;
-    if (!strstr(hdr, "f4")) { die("%s: expected float32", path); }
-    char *s = strstr(hdr, "'shape':"); assert(s); s = strchr(s, '(');
+    /* dtype: require little-endian (or not-applicable) float32. The reader is
+     * row-major and host-endian, so reject big-endian and non-f4 explicitly
+     * instead of silently misreading. */
+    char *descr = strstr(hdr, "'descr'");
+    if (!descr) die("%s: .npy header missing 'descr'", path);
+    char *q = strchr(descr, ':'); if (q) q = strchr(q, '\'');
+    if (!q) die("%s: malformed .npy descr", path);
+    char dt[8] = {0}; int di = 0; ++q;
+    while (*q && *q != '\'' && di < 7) dt[di++] = *q++;
+    if (!(strcmp(dt, "<f4") == 0 || strcmp(dt, "|f4") == 0 || strcmp(dt, "=f4") == 0))
+        die("%s: expected little-endian float32 ('<f4'), got '%s'", path, dt);
+    /* fortran_order must be False (we read C-order row-major). */
+    char *fo = strstr(hdr, "'fortran_order'");
+    if (fo && strstr(fo, "True")) die("%s: fortran_order=True is not supported (save as C-order)", path);
+    char *s = strstr(hdr, "'shape'");
+    if (!s) die("%s: .npy header missing 'shape'", path);
+    s = strchr(s, '(');
     int r = 0, c = 0;
-    if (sscanf(s, "(%d, %d", &r, &c) != 2) { die("%s: bad shape", path); }
+    if (!s || sscanf(s, "(%d, %d", &r, &c) != 2) die("%s: bad or non-2D shape", path);
+    if (r <= 0 || c <= 0) die("%s: non-positive shape (%d,%d)", path, r, c);
     free(hdr);
     float *data = (float *)malloc((size_t)r * c * sizeof(float));
     if (fread(data, sizeof(float), (size_t)r * c, f) != (size_t)r * c) die("%s: unexpected end of file", path);
@@ -65,11 +126,6 @@ static const int NUMCOL[14] = {7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 
 #define IDCOL  0
 #define NFIELD 22
 
-static int emb_name_filter(const struct dirent *e) {
-    return strncmp(e->d_name, "emb_chunk_", 10) == 0 &&
-           strstr(e->d_name, ".npy") != NULL;
-}
-
 Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_len) {
     Dataset d; memset(&d, 0, sizeof(d));
     d.d_num = 14; d.d_text = 384; d.in_len = in_len; d.pred_len = pred_len;
@@ -86,8 +142,12 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
         if (lineno++ == 0) continue;                 /* header */
         if (!strchr(line, ',')) continue;
         char *fields[NFIELD]; int nf = 0;
-        char *p = line, *tok;
-        while (nf < NFIELD && (tok = strsep(&p, ",")) != NULL) fields[nf++] = tok;
+        char *p = line;                              /* portable comma split (no strsep) */
+        while (nf < NFIELD && p) {
+            fields[nf++] = p;
+            char *comma = strchr(p, ',');
+            if (comma) { *comma = 0; p = comma + 1; } else p = NULL;
+        }
         if (nf < 21) continue;
         if (n == cap) {
             cap *= 2;
@@ -109,12 +169,12 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     d.n_storms = gid + 1;
 
     /* ---- embeddings ---- */
-    struct dirent **names; int nc = scandir(embdir, &names, emb_name_filter, alphasort);
+    char **names; int nc = list_emb_chunks(embdir, &names);
     if (nc <= 0) { die("no emb_chunk_*.npy in %s", embdir); }
     d.emb = malloc((size_t)n * d.d_text * sizeof(float));
     int got = 0;
     for (int i = 0; i < nc; ++i) {
-        char path[1024]; snprintf(path, sizeof(path), "%s/%s", embdir, names[i]->d_name);
+        char path[1024]; snprintf(path, sizeof(path), "%s/%s", embdir, names[i]);
         int r, c; float *chunk = npy_load_2d(path, &r, &c);
         assert(c == d.d_text);
         if (got + r > n) r = n - got;                 /* guard */
