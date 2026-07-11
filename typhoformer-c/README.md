@@ -234,24 +234,29 @@ The unit tests double as the correctness contract for every extension seam:
 
 Every layer is validated by finite-difference gradient checks (tensor core, a
 full transformer block, and the whole model — all at the single-precision noise
-floor). On the **held-out test storms** (never seen in training or model
-selection), the compact demo config trains stably but does **not** beat
-persistence:
+floor). But the more important question is whether it *forecasts* — see
+[docs/FINDINGS.md](docs/FINDINGS.md). On the **held-out test storms** (never seen
+in training or selection), varying only the storm split:
 
-```
-epoch  0 (init) | val dR ~2000 km   (persistence ~103 km on the test storms)
-best (early stop, epoch 14) | val dR  92.0 km
-HELD-OUT TEST   | dR 172.9 km | MAE 1.04   (persistence 102.7 km)
-```
+| what | held-out test ΔR | persistence |
+|:--|:--:|:--:|
+| model, 5 different splits | **128.5 ± 41.3 km** (min 95, max 206) | 123.5 km |
+| **numbers-only** (`--no_text`, split 42) | **156.0 km** | 102.7 km |
+| with-text (full model, split 42) | 172.9 km | 102.7 km |
 
-> **Honesty note.** Earlier versions reported ΔR ≈ 79 km "beating persistence,"
-> but that came from data leakage — normalization was fit on the whole dataset
-> and overlapping windows were split randomly, so validation storms bled into
-> training. With a storm-level split, train-only statistics, and a genuine
-> held-out test set (all now enforced), the honest picture is that the **compact
-> demo does not beat persistence on unseen storms**. Beating it would need the
-> full paper config, more data, and tuning — the point of the fixes is that the
-> number you see is now real.
+Two honest conclusions: the model is at **rough parity with persistence** (the
+±41 km split noise dwarfs the ~5 km gap), and the **language branch does not
+help** here — numbers-only is ~17 km *better* on the tested split, contradicting
+the paper's premise on this data.
+
+> **Honesty note.** Earlier versions reported ΔR ≈ 79 km "beating persistence."
+> That was data leakage — normalization fit on the whole dataset and overlapping
+> windows split randomly, so validation storms bled into training. With a
+> storm-level split, train-only statistics, and a real held-out test set (all now
+> enforced), the favourable number disappears. The gradient checks, golden test,
+> and cross-backend agreement confirm the *math* is correct; this much data (~98
+> storms) is simply too little for the model to beat persistence robustly. The
+> point of the fixes is that the numbers you see are now real.
 
 ## Notes
 
