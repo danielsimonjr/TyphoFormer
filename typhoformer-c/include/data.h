@@ -17,28 +17,67 @@
 
 #include "tensor.h"
 
+/*
+ * Dataset — the single in-memory container for every representation of the
+ * data used during training/eval. There are two mutually-exclusive population
+ * paths, selected by the `prewindowed` flag:
+ *
+ *   CSV path (prewindowed==0):  per-record arrays (num/emb/lat/lon/gid/tkey)
+ *       are filled by dataset_load, then sliding windows are described lazily
+ *       by `start` (each sample is a length-in_len+pred_len slice of records).
+ *       dataset_get() reconstructs a sample on demand from these arrays.
+ *   TFB path (prewindowed==1):  dataset_load_bin fills the already-windowed
+ *       tensors win_in/win_tg/win_seed directly; the per-record arrays and
+ *       `start` stay NULL. dataset_get() just copies out of win_*.
+ *
+ * Units convention, important for reasoning about leakage and denorm:
+ *   - `num`  starts RAW (physical units from the CSV) and becomes z-scored
+ *            (standardized, mean 0 / std 1 per column) IN PLACE after
+ *            dataset_standardize / dataset_apply_stats / the .tfb loader.
+ *   - `lat`/`lon` stay RAW degrees for the whole lifetime; coordinates are
+ *            normalized on the fly (see cnorm) only when handed out by
+ *            dataset_get, and never mutated in place.
+ */
 typedef struct {
-    int    n_records;
+    int    n_records;    /* total CSV records parsed (rows across all storms) */
     int    d_num, d_text, in_len, pred_len;
-    float *num;          /* n_records * d_num  (standardized in place)      */
-    float *emb;          /* n_records * d_text                              */
-    float *lat, *lon;    /* n_records (raw degrees)                         */
-    int   *gid;          /* storm group id per record                       */
-    int    n_storms;     /* number of distinct storms (max gid + 1)         */
-    int   *storm_split;  /* n_storms: 0=train 1=val 2=test (NULL until split)*/
-    float  mean[64], std[64];   /* feature normalization (train-only fit)   */
-    float  cmean[2], cstd[2];   /* coord (lat,lon) normalization; identity  */
-                                /* {0,1} means "raw" (bin path / unset)     */
-    int   *start;        /* n_samples window start record indices           */
-    int    n_samples;
-    int    prewindowed;  /* 1 => samples come from a .tfb file (below)       */
-    int    no_text;      /* 1 => dataset_get zeros the text branch (ablation)*/
-    float *win_in;       /* n_samples * in_len * (d_num+d_text)             */
-    float *win_tg;       /* n_samples * pred_len * 2                        */
-    float *win_seed;     /* n_samples * 2: true decoder seed (TFB2) or NULL */
-    long  *tkey;         /* n_records: date*10000+time (co-activity key)    */
-    float *nbr;          /* n_records * TF_NBR_K * TF_NBR_NF (co-active nbrs)*/
-    int   *nbr_cnt;      /* n_records: number of co-active neighbours        */
+                         /* d_num: numeric feature width (14 raw; +4 after
+                          *   dataset_add_motion). d_text: MiniLM embedding
+                          *   width (384). in_len: encoder/history length.
+                          *   pred_len: decoder/forecast horizon.            */
+    float *num;          /* [n_records * d_num] numeric features, row-major.
+                          *   RAW at load; z-scored IN PLACE after standardize */
+    float *emb;          /* [n_records * d_text] MiniLM text embeddings, raw  */
+    float *lat, *lon;    /* [n_records] each; RAW degrees, never mutated      */
+    int   *gid;          /* [n_records] storm group id per record (0-based)   */
+    int    n_storms;     /* number of distinct storms (max gid + 1)           */
+    int   *storm_split;  /* [n_storms] 0=train 1=val 2=test; NULL until
+                          *   dataset_split3 runs. The per-STORM label is what
+                          *   makes standardization leakage-safe.             */
+    float  mean[64], std[64];   /* per-column feature z-score stats, fit on
+                          *   TRAIN records only. Indexed [0,d_num). 64 is a
+                          *   fixed upper bound (>= max d_num of 18).          */
+    float  cmean[2], cstd[2];   /* coordinate (lat,lon) normalization stats.
+                          *   Identity {mean 0, std 1} means "raw / unset"
+                          *   (the .tfb path and any pre-standardize state);
+                          *   real values are fit on TRAIN records only.      */
+    int   *start;        /* [n_samples] first record index of each window
+                          *   (CSV path only; NULL on the .tfb path).         */
+    int    n_samples;    /* number of sliding-window samples                  */
+    int    prewindowed;  /* 1 => samples come from a .tfb file (win_* below,
+                          *   per-record arrays unused).                      */
+    int    no_text;      /* 1 => dataset_get zeros the text branch (ablation) */
+    float *win_in;       /* [n_samples * in_len * (d_num+d_text)] .tfb inputs;
+                          *   numeric cols standardized in place by the loader */
+    float *win_tg;       /* [n_samples * pred_len * 2] .tfb target coords
+                          *   (RAW degrees; cnorm applied when handed out)     */
+    float *win_seed;     /* [n_samples * 2] true decoder seed coord (TFB2);
+                          *   NULL for legacy TFB1 (which leaks via tg[0])     */
+    long  *tkey;         /* [n_records] timestamp key = date*10000+time; used
+                          *   to find co-active storms sharing a moment.       */
+    float *nbr;          /* [n_records * TF_NBR_K * TF_NBR_NF] relative
+                          *   neighbour vectors (Δlat,Δlon,Δmax_wind) per rec  */
+    int   *nbr_cnt;      /* [n_records] how many neighbour slots are filled    */
 } Dataset;
 
 /* Co-active spatial neighbours: up to K storms sharing a timestamp, each a

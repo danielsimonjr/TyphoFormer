@@ -19,14 +19,31 @@
  * format errors throughout the CLI. */
 TF_NORETURN void die(const char *fmt, ...);
 
-/* Row-major dense matrix of 32-bit floats (data has rows*cols elements). */
+/* Row-major dense matrix of 32-bit floats (data has rows*cols elements).
+ *
+ * Memory model:
+ *   - `data` points to a single contiguous block of rows*cols floats.
+ *   - Storage is ROW-MAJOR: the element at logical position (i, j) — row i,
+ *     column j — lives at the flat index i*cols + j. So consecutive columns of
+ *     a fixed row are adjacent in memory, but stepping down a column jumps by
+ *     `cols` floats. Every loop in tensor.c is written to walk memory in this
+ *     contiguous (row-inner) order for cache efficiency.
+ *   - The Mat is passed BY VALUE (a small {rows, cols, ptr} handle), but the
+ *     `data` pointer is shared: copying a Mat aliases the same buffer, it does
+ *     NOT deep-copy. Only mat_new allocates and only mat_free releases; the
+ *     other ops assume `data` is already sized rows*cols. Ownership therefore
+ *     lives with whoever called mat_new, not with the by-value copies. */
 typedef struct {
-    int    rows;
-    int    cols;
-    float *data;
+    int    rows;   /* number of rows (m)                                    */
+    int    cols;   /* number of columns (n); row stride, in floats, is cols */
+    float *data;   /* owning pointer to rows*cols contiguous floats         */
 } Mat;
 
-/* Allocation. mat_new zero-initialises. */
+/* Allocation / lifetime helpers.
+ *   mat_new  : allocate a rows x cols matrix, zero-initialised (via calloc).
+ *   mat_free : release the buffer and null it out (safe to call twice).
+ *   mat_zero : overwrite all elements with 0.0f (buffer kept).
+ *   mat_copy : deep-copy src's elements into dst (shapes must match). */
 Mat  mat_new(int rows, int cols);
 void mat_free(Mat *m);
 void mat_zero(Mat m);
@@ -37,7 +54,13 @@ void mat_copy(Mat dst, const Mat src);
  *   mat_matmul_bt  : out = A   @ B^T   A[m,k] B[n,k] -> out[m,n]
  *   mat_matmul_atb : out = A^T @ B     A[k,m] B[k,n] -> out[m,n]
  * These three cover a linear layer's forward pass and both of its gradients.
- */
+ * Concretely, for a layer y = x @ W^T + b with x[m,k], W[n,k]:
+ *   - forward           y  = x @ W^T             -> mat_matmul_bt(x, W, y)
+ *   - grad w.r.t. input dx = dy @ W              -> mat_matmul(dy, W, dx)
+ *   - grad w.r.t. weight dW = dy^T @ x           -> mat_matmul_atb(dy, x, dW)
+ * The shared inner dimension (named k below) is the one summed over; it must
+ * agree between the two operands, and `out` must already have the result
+ * shape — these functions never allocate. */
 void mat_matmul(const Mat A, const Mat B, Mat out);
 void mat_matmul_bt(const Mat A, const Mat B, Mat out);
 void mat_matmul_atb(const Mat A, const Mat B, Mat out);
