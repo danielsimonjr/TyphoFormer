@@ -28,10 +28,11 @@ Start at [docs/README.md](docs/README.md) for the suggested learning path.
 - **Full pipeline.** Data preparation, training (forward + backprop + Adam),
   multi-step autoregressive inference, evaluation, and baselines are all in C.
 - **Built to be extended.** A pluggable [`Module`](include/module.h) interface
-  for new layers, a documented [compute-backend seam](include/backend.h) (CPU
-  reference + a CUDA reference under [`backends/`](backends/)), and
-  [data-parallel multicore](include/parallel.h) training via pthreads — each
-  covered by its own gradient/equivalence test.
+  for new layers, a documented [compute-backend seam](include/backend.h) with
+  **two reference backends** under [`backends/`](backends/) — a runnable
+  **OpenCL** backend (verified on a CPU device via POCL) and a **CUDA** backend
+  (compiles with `nvcc`) — and [data-parallel multicore](include/parallel.h)
+  training via pthreads. Each is covered by its own gradient/equivalence test.
 - **Language branch is precomputed.** The GPT-4o descriptions and MiniLM
   sentence embeddings are produced offline (outside this C code); the C
   program consumes the resulting numerical embedding vectors.
@@ -157,8 +158,11 @@ buffers, so training does no per-step heap allocation.
 Native SIMD roughly halves the full-config epoch time; `--threads=N` adds
 data-parallel scaling across cores on top (see **Multicore training** above).
 For a GPU or other accelerator, implement the ~13-kernel contract in
-[`include/backend.h`](include/backend.h) — a compile-ready CUDA reference lives
-in [`backends/cuda/`](backends/).
+[`include/backend.h`](include/backend.h): [`backends/opencl/`](backends/opencl/)
+is a **runnable** OpenCL backend (`make OPENCL=1 test-opencl` verifies the whole
+model through it — works on a real GPU or on a CPU via POCL), and
+[`backends/cuda/`](backends/cuda/) is a CUDA backend that compiles with `nvcc`.
+See [`backends/README.md`](backends/README.md).
 
 ## Development
 
@@ -169,14 +173,17 @@ in [`backends/cuda/`](backends/).
 | `make test` | Build + run all unit tests (gradient checks, golden, module, parallel, checkpoint, npy). |
 | `make test-san` | Rebuild with **AddressSanitizer + UBSan** and run the tests. |
 | `make test-valgrind` | Run the whole test suite under **valgrind** (memcheck + leak-check). |
+| `make OPENCL=1 test-opencl` | Build the model on the **OpenCL** backend and verify it (kernels vs CPU + full-model gradient check). Needs an OpenCL ICD (`pocl-opencl-icd` for CPU). |
 | `make NATIVE=1` | Build with `-march=native -funroll-loops` (faster, non-portable binary). |
+| `make -C backends/cuda` | Compile the **CUDA** backend with `nvcc` → `libtyphoformer_cuda.a`. |
 | `make clean` | Remove build artifacts. |
 
 The code builds warning-clean under `-Wall -Wextra -Wpedantic`, is
 AddressSanitizer/UBSan/valgrind-clean and ThreadSanitizer-clean (multicore path)
 across all runtime paths, and is exercised in CI (`.github/workflows/c-ci.yml`):
-a **gcc + clang** build/test matrix, sanitizer tests, a valgrind pass, and a
-train/multicore/eval/prepare/predict/baseline/bench smoke test.
+a **gcc + clang** build/test matrix, sanitizer tests, a valgrind pass, an
+**OpenCL** job (runs the model through POCL), a **CUDA** `nvcc` compile-check,
+and a train/multicore/eval/prepare/predict/baseline/bench smoke test.
 
 The unit tests double as the correctness contract for every extension seam:
 
@@ -187,6 +194,7 @@ The unit tests double as the correctness contract for every extension seam:
 | `test_module` | a `Sequential` of pluggable `Module`s backprops correctly. |
 | `test_parallel` | multicore gradient == serial gradient (≈1e-7). |
 | `test_checkpoint`, `test_npy` | checkpoint round-trip (TFW1/TFW2) and `.npy`/split I/O. |
+| `backends/opencl/test_opencl` | OpenCL kernels match the CPU reference (≤1.2e-7); model runs through OpenCL. |
 
 ## Status — complete
 
@@ -199,7 +207,7 @@ The unit tests double as the correctness contract for every extension seam:
 - [x] Multi-step autoregressive decoding + per-horizon metrics
 - [x] `train`/`eval`/`prepare`/`predict`/`baseline`/`bench` subcommands + config CLI
 - [x] Best-checkpoint saving (with normalization stats), LR decay, early stopping
-- [x] Pluggable `Module` interface + compute-backend seam (CPU + CUDA reference)
+- [x] Pluggable `Module` interface + compute-backend seam (CPU + runnable OpenCL + CUDA)
 - [x] Data-parallel multicore training (pthreads) — gradient-equivalence tested
 - [x] gcc/clang CI matrix, sanitizers, valgrind, golden regression
 

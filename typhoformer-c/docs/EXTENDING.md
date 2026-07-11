@@ -141,12 +141,21 @@ your own on it. **Acceptance:** extend `tests/test_module.c` and watch the
 ### 6b. New compute device — the backend seam
 [`include/backend.h`](../include/backend.h) documents the ~13-kernel contract
 (GEMMs, bias, pointwise, scalar) that *every* layer is built from. `src/tensor.c`
-is the CPU backend; implement the same functions over device memory and link
-that file instead to retarget the whole model. A compile-ready CUDA reference is
-in [`backends/cuda/tensor_cuda.cu`](../backends/cuda/tensor_cuda.cu) (see
-[`backends/README.md`](../backends/README.md), including the honest note on the
-glue-code elementwise loops). **Acceptance:** the CPU gradient checks
-(`test_tensor`, `test_model`) pass unchanged against your backend.
+is the CPU backend; implement the same functions and link that file instead to
+retarget the whole model. Two references ship:
+
+- [`backends/opencl/tensor_opencl.c`](../backends/opencl/tensor_opencl.c) — a
+  **runnable** OpenCL backend. It keeps `Mat.data` host-resident and offloads each
+  kernel, so the entire model runs through it. Verify on a CPU device with no GPU:
+  `sudo apt-get install pocl-opencl-icd ocl-icd-opencl-dev opencl-headers`, then
+  `make OPENCL=1 test-opencl`.
+- [`backends/cuda/tensor_cuda.cu`](../backends/cuda/tensor_cuda.cu) — a
+  device-resident CUDA reference; `make -C backends/cuda` compiles it with `nvcc`.
+
+See [`backends/README.md`](../backends/README.md) for the host-resident vs.
+device-resident trade-off (the latter hits the glue-code elementwise loops).
+**Acceptance:** the CPU gradient checks (`test_tensor`, `test_model`) pass
+unchanged against your backend — as they do for OpenCL.
 
 ### 6c. Multicore training — the data-parallel seam
 [`include/parallel.h`](../include/parallel.h) / `src/parallel.c` replicate the

@@ -119,15 +119,19 @@ with `--threads=1`, `2`, `4`, `8` and record epoch time.
 gradient is unchanged (≈`1e-7`) so speed didn't cost correctness. Confirm with
 ThreadSanitizer: `cc -fsanitize=thread ... tests/test_parallel.c`.
 
-### Lab C2 — A GPU (or SIMD) backend
+### Lab C2 — A GPU / OpenCL / SIMD backend
 **Goal:** retarget the compute seam.
 **Files:** `include/tensor.h` (contract), `backends/README.md`,
-`backends/cuda/tensor_cuda.cu` (reference).
-**Steps:** with CUDA available, `cd backends/cuda && make`; or write a new
-backend for your device implementing the same ~13 kernels. Start from the honest
-caveat in `backends/README.md` about the glue-code elementwise loops.
+`backends/opencl/tensor_opencl.c` (runnable), `backends/cuda/tensor_cuda.cu`.
+**Steps:** run the OpenCL backend on any machine — no GPU needed — with
+`sudo apt-get install pocl-opencl-icd ocl-icd-opencl-dev opencl-headers` then
+`make OPENCL=1 test-opencl`. Read how it offloads each kernel while keeping
+`Mat.data` on the host. Then write your own backend (a tiled OpenCL GEMM, a SIMD
+kernel, or CUDA) implementing the same ~13 functions; mind the host-resident vs.
+device-resident trade-off in `backends/README.md`.
 **Check:** the CPU gradient checks are the acceptance test — a correct backend
-passes `tests/test_tensor` and `tests/test_model` unchanged.
+passes `tests/test_tensor` and `tests/test_model` unchanged (the OpenCL backend
+does; `make OPENCL=1 test-opencl` proves it).
 
 ### Lab C3 — Embed as a library
 **Goal:** run inference from another program.
