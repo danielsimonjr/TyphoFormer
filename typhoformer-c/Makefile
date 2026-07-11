@@ -21,7 +21,7 @@ OBJ     := $(SRC:.c=.o)
 TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
-.PHONY: all test clean
+.PHONY: all test test-san clean
 
 all: typhoformer
 
@@ -35,6 +35,11 @@ tests/%: tests/%.c $(BUILD)
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== running $$t =="; ./$$t || exit 1; done
+
+# Rebuild with AddressSanitizer + UBSan and run the tests.
+test-san:
+	$(MAKE) clean
+	$(MAKE) SAN=1 test
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
