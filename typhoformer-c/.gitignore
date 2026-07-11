@@ -5,6 +5,11 @@ tests/test_tensor
 tests/test_nn
 tests/test_model
 tests/test_data
+tests/test_golden
+tests/test_module
+tests/test_config
+tests/test_checkpoint
+tests/test_backend
 typhoformer
 *.bin
 *.out

@@ -18,7 +18,7 @@ endif
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)
 
-TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data tests/test_golden
+TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data tests/test_golden tests/test_module
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
 .PHONY: all lib test test-san clean
