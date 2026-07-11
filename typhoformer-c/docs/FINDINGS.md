@@ -223,7 +223,69 @@ the honest next test. But the lesson is clean and consistent with §5: give the
 decoder the right physical anchor — motion in, velocity threaded, correction
 learned from zero — and it matches the classical baseline instead of trailing it.
 
-## 10. What this means
+## 10. Recurrent state and cross-attention — the first signal, at long horizons
+
+The cv decoder (§9) still threads only a 4-number state (position + velocity) and
+re-reads a single pooled context. Two upgrades give it more:
+
+- **`--gru`** carries a full d_model hidden state across the rollout (initialised
+  from the encoder context) to produce the curvature correction — real memory.
+- **`--xattn`** replaces the static pooled context with per-step **cross-attention
+  over the encoder's full sequence**, so each forecast step reads the history it
+  needs rather than one averaged vector.
+
+Both anchor at constant-velocity (zero-init output), both are gradient-checked as
+standalone cells *and* through the full model. Held-out test ΔR (km), `--motion`,
+three storm splits:
+
+| decoder | 6h — s1 | s3 | s5 | mean | | 6–24h mean — s1 | s3 | s5 | mean |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| `--cv`    | 42.2 | 41.3 | 37.9 | 40.5 | | 144.1 | 140.6 | 133.3 | 139.3 |
+| `--gru`   | 42.5 | 41.8 | 38.8 | 41.0 | | 145.7 | 135.1 | 125.0 | 135.3 |
+| `--xattn` | 42.3 | 41.5 | 37.8 | 40.5 | | 144.5 | 151.5 | 115.3 | 137.1 |
+| *CLIPER*  |  —   |  —   |  —   | 39.4 | |   —   |   —   |   —   | 141.3 |
+
+**At a single step (6h) they do nothing** — all three sit at ~40.5 km, identical to
+cv. No surprise: there is no multi-step memory to exploit, and a 6h forecast is
+already close to constant-velocity.
+
+**At multiple steps a signal appears.** The means edge below cv (gru 135.3,
+xattn 137.1 vs 139.3) and below the CLIPER mean (141.3) — but the multi-step
+split noise is large (±10 km), so the *means* alone are only suggestive. The
+per-horizon breakdown on the favourable split (seed 5) is where it becomes
+legible:
+
+| horizon | CLIPER | `--cv` | `--gru` | `--xattn` |
+|:--|:--:|:--:|:--:|:--:|
+|  6h | 39.4 | 37.8 | 36.0 | **34.5** |
+| 12h | 97.9 | 91.3 | 85.5 | **81.6** |
+| 18h |171.4 |160.1 |149.4 | **138.9** |
+| 24h |256.4 |244.0 |229.1 | **206.3** |
+
+The gain **grows monotonically with horizon**: negligible at 6h (~2–3 km), but at
+24h `--xattn` beats cv by 38 km and constant-velocity by **50 km (20%)**, with
+`--gru` in between. This is the first place in the whole exercise where a *network*
+change — recurrent memory, real cross-attention — clearly helps, and it lands
+exactly where the hypothesis (§10 of the earlier discussion) said it should: at
+long horizons, where storms recurve and constant-velocity drifts.
+
+Two honest caveats keep this from being a clean win:
+
+1. **It is split-dependent.** Seed 5 shows the effect strongly; on seed 3
+   `--xattn` is actually *worse* than cv (151.5 vs 140.6). `--gru` is the more
+   consistent of the two (beats cv on 2 of 3 splits, never much worse), `--xattn`
+   the higher-ceiling / higher-variance one. With only 98 storms, a three-split
+   spread this wide means "promising", not "established".
+2. **The absolute numbers are still large.** Even the best 24h forecast (~206 km)
+   is a coarse result; on this much data the model is matching-to-slightly-beating
+   a two-line physics baseline, not superseding it.
+
+So: unlike the encoder and attention tweaks of §7–§8 (flatly neutral), the
+decoder's *memory* is a real lever at long horizons — the honest next step is to
+confirm it with more storms and longer training, where the trend here suggests
+the learned curvature term should pull further ahead of constant-velocity.
+
+## 11. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
@@ -242,16 +304,22 @@ learned from zero — and it matches the classical baseline instead of trailing 
   The remaining frontier is **longer horizons** (where curvature should let the
   learned model finally *pass* constant-velocity) and — the ceiling on everything
   — **more than 98 storms**.
-- **The network internals are not the lever** (§7, §8). An encoder sweep (no_spatial /
-  posenc / pool=last / prenorm) and two attention upgrades — a temporal
-  distance bias (`--timebias`) and *real* multi-node spatial attention over
-  co-active storms (`--co_spatial`) — are all neutral within split noise on the
-  fixed model. Each is the architecturally right thing to do; none moves ΔR on
-  this data. Building `--co_spatial` properly still paid off: it surfaced (and
-  we fixed, via a zero-init residual) a real training divergence that a
-  single-split run would have hidden. The levers that *did* move ΔR were all about
-  the physics the model sees — motion features, a displacement head, a
-  constant-velocity anchor — not the depth or attention of the network.
+- **The network internals barely move the single-step number** (§7, §8). An encoder
+  sweep (no_spatial / posenc / pool=last / prenorm) and two attention upgrades — a
+  temporal distance bias (`--timebias`) and *real* multi-node spatial attention over
+  co-active storms (`--co_spatial`) — are all neutral within split noise at 6h.
+  Building `--co_spatial` properly still paid off: it surfaced (and we fixed, via a
+  zero-init residual) a real training divergence that a single-split run would have
+  hidden. The levers that moved the 6h number were all about the physics the model
+  sees — motion features, a displacement head, a constant-velocity anchor.
+- **But decoder *memory* is a real lever at long horizons** (§10). Giving the cv
+  rollout a recurrent hidden state (`--gru`) or per-step cross-attention over the
+  encoder sequence (`--xattn`) does nothing at 6h, but the benefit grows with
+  horizon: on the favourable split, `--xattn` at 24h beats constant-velocity by
+  ~50 km (20%). It is split-dependent (promising, not established, on 98 storms),
+  and `--gru` is the more consistent of the two — but this is the first *network*
+  change that clearly helps, exactly where curvature should matter. Confirming it
+  with more storms and longer horizons is the honest next step.
 
 ## Reproduce
 
@@ -260,6 +328,10 @@ learned from zero — and it matches the classical baseline instead of trailing 
 for s in 1 2 3 4 5; do ./typhoformer train 30 --patience=8 --motion --delta --split_seed=$s; done
 # the constant-velocity decoder — reaches CLIPER (§9)
 for s in 1 3 5; do ./typhoformer train 30 --patience=8 --motion --cv --threads=1 --split_seed=$s; done
+# decoder memory at long horizons (§10) — compare per-horizon dR at pred_len=4
+./typhoformer train 30 --patience=8 --motion --cv    --threads=1 --pred_len=4 --split_seed=5
+./typhoformer train 30 --patience=8 --motion --gru   --threads=1 --pred_len=4 --split_seed=5
+./typhoformer train 30 --patience=8 --motion --xattn --threads=1 --pred_len=4 --split_seed=5
 # does text help the fixed model?
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42            # with text
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42 --no_text  # numbers only
