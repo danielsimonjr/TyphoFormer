@@ -161,7 +161,7 @@ typedef struct { int d_num, d_text, d_model, out_dim,
                      in_len, pred_len, d_ff, n_heads, n_layers; } Config;
 Config config_default(void);   // the paper config (d_model=256, d_ff=1024, 3 layers, 4 heads)
 
-void  model_set_delta(int on);   // decoder predicts displacement; call BEFORE model_new
+void  model_set_delta(int on);   // displacement head (predict Δ from seed); call BEFORE model_new
 Model model_new(const Config *c, ParamList *pl);
 void  model_forward (Model *m, const Mat xnum, const Mat xtext, const Mat yprev); // fills m->pred, m->pgf.gate
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);

@@ -97,11 +97,19 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
-| `--delta` | Decoder predicts **displacement** from the seed (fc2 zero-init → starts at persistence, learns the correction). | off |
+| `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
+| `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
 | `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
 | `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
+
+**For accuracy, train with `--motion --delta`.** Motion features give the model
+the trajectory signal, and the displacement head lets it start at persistence and
+learn the correction; together they take held-out ΔR from ~128 km to ~48 km (see
+[docs/FINDINGS.md](docs/FINDINGS.md)). `eval`/`predict` auto-detect `--motion`
+from the checkpoint's feature count; pass `--delta` to `eval` to match a
+displacement-head checkpoint.
 
 `--no_text` is the key scientific control: it tests whether the GPT-4o/MiniLM
 language branch — the paper's central premise — actually helps versus a

@@ -106,7 +106,7 @@ metric `|g_num − g_ana| / (|g_num| + |g_ana| + 1e-2)` and an absolute floor of
 | **Dropout** | *Implemented* — see `dropout_apply` in `src/nn.c` and the block's `drop1`/`drop2` masks. A cached 0/(1/(1-p)) mask in forward, multiplied into the gradient in backward, gated by `nn_set_training`. Model your own stochastic layer on it. |
 | **Learned positional encoding** | add a `[T,D]` parameter to the encoder, `+=` it after `input_proj`, register it, and add its (identity) gradient in backward. |
 | **New numerical features** | change `NUMCOL`/`d_num` in `data.c` and `Config.d_num`; retrain (the checkpoint config guards against loading a mismatched model). `dataset_add_motion()` (the `--motion` flag) is the worked reference — it appends `lat, lon, Δlat, Δlon` and bumps `d_num` 14→18, and it is the change that most improves forecast skill (see [FINDINGS.md](FINDINGS.md)). |
-| **Delta / residual decoder** | *Implemented* (`--delta`, `model_set_delta`): the decoder predicts displacement from the seed with `fc2` zero-init. A one-line forward change (accumulate) and one-line backward change (identity term). Copy it for any "predict a correction over a baseline" head. |
+| **Displacement head** (delta / residual decoder) | *Implemented* (`--delta`, `model_set_delta`): the decoder predicts displacement from the seed with `fc2` zero-init. A one-line forward change (accumulate) and one-line backward change (identity term). Copy it for any "predict a correction over a baseline" head. |
 | **Bigger/smaller model** | just change `Config` fields — the whole graph is config-driven. |
 
 ---
