@@ -22,6 +22,10 @@ int  model_delta(void) { return g_delta; }
 static int g_cv = 0;
 void model_set_cv(int on) { g_cv = on; }
 
+/* Recurrent (GRU) decoder correction. Implies the cv anchor. Off by default. */
+static int g_gru = 0;
+void model_set_gru(int on) { g_gru = on; if (on) g_cv = 1; }
+
 /* Encoder architecture options (read at encoder_new time). Off by default. */
 static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0, g_co_spatial = 0;
 void model_set_no_spatial(int on) { g_no_spatial = on; }
@@ -201,14 +205,24 @@ void encoder_free(Encoder *e) {
  * ===================================================================== */
 Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
-    d.use_cv = g_cv;
-    /* cv mode also feeds the current velocity, so fc1's input is [h; y_prev; v]. */
-    int fc1_in = c->d_model + c->out_dim + (g_cv ? c->out_dim : 0);
-    d.fc1 = linear_new(fc1_in, c->d_model, pl, "dec.fc1");
-    d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
-    if (g_delta || g_cv) {          /* start at persistence (delta) / const-velocity (cv) */
-        memset(d.fc2.W.data, 0, (size_t)d.fc2.out * d.fc2.in * sizeof(float));
-        memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
+    d.use_cv = g_cv; d.use_gru = g_gru;
+    if (g_gru) {
+        /* GRU correction: input is [p; v] (2*out); hidden = d_model, initialised
+         * from the encoder context. fc_out projects hidden -> out, zero-init so
+         * the untrained model still starts at constant-velocity. */
+        d.gru    = gru_new(2 * c->out_dim, c->d_model, c->pred_len, pl, "dec.gru");
+        d.fc_out = linear_new(c->d_model, c->out_dim, pl, "dec.fc_out");
+        memset(d.fc_out.W.data, 0, (size_t)d.fc_out.out * d.fc_out.in * sizeof(float));
+        memset(d.fc_out.b, 0, (size_t)d.fc_out.out * sizeof(float));
+    } else {
+        /* cv mode also feeds the current velocity, so fc1's input is [h; y_prev; v]. */
+        int fc1_in = c->d_model + c->out_dim + (g_cv ? c->out_dim : 0);
+        d.fc1 = linear_new(fc1_in, c->d_model, pl, "dec.fc1");
+        d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
+        if (g_delta || g_cv) {          /* start at persistence (delta) / const-velocity (cv) */
+            memset(d.fc2.W.data, 0, (size_t)d.fc2.out * d.fc2.in * sizeof(float));
+            memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
+        }
     }
     d.zc  = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.h1c = (Mat *)calloc(d.max_steps, sizeof(Mat));
@@ -216,11 +230,37 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
     d.s_yt = NULLMAT; d.s_a = NULLMAT; d.s_ytn = NULLMAT; d.s_v = NULLMAT;
     d.s_da = NULLMAT; d.s_dh1 = NULLMAT; d.s_dz = NULLMAT;
     d.s_dyt = NULLMAT; d.s_dynext = NULLMAT; d.s_dvnext = NULLMAT; d.s_dhacc = NULLMAT;
+    d.s_hid0 = NULLMAT; d.s_dhid = NULLMAT; d.s_dhc = NULLMAT; d.s_dx2 = NULLMAT;
     return d;
 }
 void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vseed, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
     assert(steps <= d->max_steps);
+    if (d->use_gru) {
+        /* Recurrent constant-velocity rollout. Same anchor arithmetic as cv, but
+         * the correction is c = fc_out(GRU([p;v], hid)) with hid carried across
+         * steps and hid_0 = the encoder context. */
+        ensure(&d->s_yt, 1, O); ensure(&d->s_ytn, 1, O); ensure(&d->s_v, 1, O); ensure(&d->s_hid0, 1, H);
+        Mat p = d->s_yt, c = d->s_ytn, v = d->s_v, hid_prev = d->s_hid0;
+        mat_copy(p, yprev);
+        if (vseed.data) mat_copy(v, vseed); else mat_zero(v);
+        mat_copy(hid_prev, henc);                      /* hid_0 = encoder context */
+        for (int s = 0; s < steps; ++s) {
+            ensure(&d->zc[s], 1, 2 * O); ensure(&d->ac[s], 1, H);
+            memcpy(&d->zc[s].data[0], p.data, O * sizeof(float));   /* x_s = [p ; v] */
+            memcpy(&d->zc[s].data[O], v.data, O * sizeof(float));
+            gru_forward(&d->gru, s, d->zc[s], hid_prev, d->ac[s]);  /* hid_s -> ac[s] */
+            linear_forward(&d->fc_out, d->ac[s], c);               /* correction */
+            for (int i = 0; i < O; ++i) {
+                float y = p.data[i] + v.data[i] + c.data[i];
+                v.data[i] += c.data[i];
+                p.data[i]  = y;
+                preds.data[s * O + i] = y;
+            }
+            hid_prev = d->ac[s];
+        }
+        return;
+    }
     if (d->use_cv) {
         /* Constant-velocity rollout: state (p = y_prev, v = velocity).
          *   z    = [h ; p ; v]
@@ -271,6 +311,35 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
  * next step's decoder input, so gradients from step s+1 flow back into it. */
 void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     const int H = d->hidden, O = d->out, steps = dpreds.rows;
+    if (d->use_gru) {
+        /* Backward of the recurrent cv rollout. dp/dv threading is identical to
+         * the cv MLP; the correction's grad flows fc_out -> hid_s, is combined
+         * with the hidden grad from step s+1, and back-propagates through the GRU
+         * (which threads dhid into step s-1 and returns dx = [dp_net; dv_net]).
+         * The initial hidden grad is the encoder-context grad. */
+        ensure(&d->s_dyt, 1, O); ensure(&d->s_dynext, 1, O); ensure(&d->s_dvnext, 1, O);
+        ensure(&d->s_dhid, 1, H); ensure(&d->s_dhc, 1, H); ensure(&d->s_dh1, 1, H); ensure(&d->s_dx2, 1, 2 * O);
+        Mat dc = d->s_dyt, dpnext = d->s_dynext, dvnext = d->s_dvnext;
+        Mat dhid_next = d->s_dhid, dhc = d->s_dhc, dhprev = d->s_dh1, dx2 = d->s_dx2;
+        mat_zero(dpnext); mat_zero(dvnext); mat_zero(dhid_next);
+        for (int s = steps - 1; s >= 0; --s) {
+            for (int i = 0; i < O; ++i)
+                dc.data[i] = dpreds.data[s * O + i] + dpnext.data[i] + dvnext.data[i];
+            mat_copy(d->fc_out.xcache, d->ac[s]);
+            linear_backward(&d->fc_out, dc, dhc);                  /* dc -> grad into hid_s */
+            for (int i = 0; i < H; ++i) dhc.data[i] += dhid_next.data[i];   /* + grad from step s+1 */
+            gru_backward(&d->gru, s, dhc, dx2, dhprev);            /* dx2=[dp_net; dv_net], dhprev */
+            for (int i = 0; i < O; ++i) {
+                float gs = dpreds.data[s * O + i];
+                float dp_old = dpnext.data[i], dv_old = dvnext.data[i];
+                dpnext.data[i] = gs + dp_old + dx2.data[i];         /* dp_s */
+                dvnext.data[i] = gs + dp_old + dv_old + dx2.data[O + i];  /* dv_s */
+            }
+            mat_copy(dhid_next, dhprev);                            /* grad into hid_{s-1} */
+        }
+        memcpy(dhenc.data, dhid_next.data, H * sizeof(float));      /* hid_0 = encoder context */
+        return;
+    }
     if (d->use_cv) {
         /* Backward of the constant-velocity recurrence. Grads on the state
          * entering step s (dp, dv) and on the correction output (dc):
@@ -324,12 +393,14 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     memcpy(dhenc.data, d->s_dhacc.data, H * sizeof(float));
 }
 void decoder_free(Decoder *d) {
-    linear_free(&d->fc1); linear_free(&d->fc2);
+    if (d->use_gru) { gru_free(&d->gru); linear_free(&d->fc_out); }
+    else            { linear_free(&d->fc1); linear_free(&d->fc2); }
     for (int s = 0; s < d->max_steps; ++s) { mat_free(&d->zc[s]); mat_free(&d->h1c[s]); mat_free(&d->ac[s]); }
     free(d->zc); free(d->h1c); free(d->ac);
     mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn); mat_free(&d->s_v);
     mat_free(&d->s_da); mat_free(&d->s_dh1); mat_free(&d->s_dz);
     mat_free(&d->s_dyt); mat_free(&d->s_dynext); mat_free(&d->s_dvnext); mat_free(&d->s_dhacc);
+    mat_free(&d->s_hid0); mat_free(&d->s_dhid); mat_free(&d->s_dhc); mat_free(&d->s_dx2);
 }
 
 /* =====================================================================

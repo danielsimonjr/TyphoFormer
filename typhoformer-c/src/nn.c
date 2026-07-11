@@ -226,6 +226,90 @@ void ffn_free(FFN *ff) {
     mat_free(&ff->h); mat_free(&ff->a); mat_free(&ff->s_da); mat_free(&ff->s_dh);
 }
 
+/* ---- GRU cell ------------------------------------------------------- */
+static float sigmoidf(float x) { return 1.0f / (1.0f + expf(-x)); }
+static Mat  *alloc_mats(int n, int cols) {
+    Mat *a = (Mat *)calloc(n, sizeof(Mat));
+    for (int i = 0; i < n; ++i) a[i] = mat_new(1, cols);
+    return a;
+}
+GRU gru_new(int in, int hid, int max_steps, ParamList *pl, const char *name) {
+    GRU g; g.in = in; g.hid = hid; g.max_steps = max_steps;
+    g.lr = linear_new(in + hid, hid, pl, name);   /* reset gate     from [x;h]     */
+    g.lu = linear_new(in + hid, hid, pl, name);   /* update gate    from [x;h]     */
+    g.ln = linear_new(in + hid, hid, pl, name);   /* candidate      from [x; r⊙h]  */
+    g.zruc = alloc_mats(max_steps, in + hid);     /* [x;h] per step */
+    g.znc  = alloc_mats(max_steps, in + hid);     /* [x; r⊙h]       */
+    g.rc = alloc_mats(max_steps, hid); g.uc = alloc_mats(max_steps, hid);
+    g.nc = alloc_mats(max_steps, hid); g.hpc = alloc_mats(max_steps, hid);
+    g.s_dzru = mat_new(1, in + hid); g.s_dzn = mat_new(1, in + hid); g.s_dg = mat_new(1, hid);
+    return g;
+}
+void gru_forward(GRU *g, int step, const Mat x, const Mat hprev, Mat hout) {
+    const int I = g->in, H = g->hid;
+    Mat zru = g->zruc[step], zn = g->znc[step];
+    Mat r = g->rc[step], u = g->uc[step], n = g->nc[step], hp = g->hpc[step];
+    mat_copy(hp, hprev);
+    memcpy(&zru.data[0], x.data, I * sizeof(float));           /* zru = [x ; h_prev] */
+    memcpy(&zru.data[I], hprev.data, H * sizeof(float));
+    linear_forward(&g->lr, zru, r); for (int i = 0; i < H; ++i) r.data[i] = sigmoidf(r.data[i]);
+    linear_forward(&g->lu, zru, u); for (int i = 0; i < H; ++i) u.data[i] = sigmoidf(u.data[i]);
+    memcpy(&zn.data[0], x.data, I * sizeof(float));            /* zn = [x ; r⊙h_prev] */
+    for (int i = 0; i < H; ++i) zn.data[I + i] = r.data[i] * hprev.data[i];
+    linear_forward(&g->ln, zn, n); for (int i = 0; i < H; ++i) n.data[i] = tanhf(n.data[i]);
+    for (int i = 0; i < H; ++i) hout.data[i] = (1.0f - u.data[i]) * n.data[i] + u.data[i] * hp.data[i];
+}
+void gru_backward(GRU *g, int step, const Mat dh, Mat dx, Mat dhprev) {
+    const int I = g->in, H = g->hid;
+    Mat zru = g->zruc[step], zn = g->znc[step];
+    Mat r = g->rc[step], u = g->uc[step], n = g->nc[step], hp = g->hpc[step];
+    Mat dzru = g->s_dzru, dzn = g->s_dzn, dg = g->s_dg;
+    float dhp[64] = {0}; /* hid <= 64 in practice; fall back to hp cols */
+    float *dhp_acc = dhp;
+    if (H > 64) dhp_acc = (float *)calloc(H, sizeof(float));
+    for (int i = 0; i < H; ++i) dhp_acc[i] = 0.0f;
+    /* h = (1-u)⊙n + u⊙hp */
+    for (int i = 0; i < H; ++i) {                              /* candidate pre-activation grad */
+        float dn = dh.data[i] * (1.0f - u.data[i]);
+        dg.data[i] = dn * (1.0f - n.data[i] * n.data[i]);      /* tanh' */
+    }
+    mat_copy(g->ln.xcache, zn);
+    linear_backward(&g->ln, dg, dzn);                          /* dzn = [dx_n ; d(r⊙hp)] */
+    for (int i = 0; i < I; ++i) if (dx.data) dx.data[i] = dzn.data[i];
+    /* r⊙hp path: d(r⊙hp) splits to dr and dhp */
+    for (int i = 0; i < H; ++i) {
+        float drh = dzn.data[I + i];
+        dhp_acc[i] += drh * r.data[i];                         /* into h_prev via candidate */
+        float dr = drh * hp.data[i];
+        dg.data[i] = dr * r.data[i] * (1.0f - r.data[i]);      /* reuse dg for reset-gate pre-act */
+    }
+    mat_copy(g->lr.xcache, zru);
+    linear_backward(&g->lr, dg, dzru);                         /* dzru = [dx_r ; dhp_r] */
+    for (int i = 0; i < I; ++i) if (dx.data) dx.data[i] += dzru.data[i];
+    for (int i = 0; i < H; ++i) dhp_acc[i] += dzru.data[I + i];
+    /* update gate: du = dh⊙(hp - n); direct hp path: dh⊙u */
+    for (int i = 0; i < H; ++i) {
+        float du = dh.data[i] * (hp.data[i] - n.data[i]);
+        dg.data[i] = du * u.data[i] * (1.0f - u.data[i]);      /* sigmoid' */
+        dhp_acc[i] += dh.data[i] * u.data[i];                  /* u⊙hp direct path */
+    }
+    mat_copy(g->lu.xcache, zru);
+    linear_backward(&g->lu, dg, dzru);                         /* dzru = [dx_u ; dhp_u] */
+    for (int i = 0; i < I; ++i) if (dx.data) dx.data[i] += dzru.data[i];
+    for (int i = 0; i < H; ++i) dhp_acc[i] += dzru.data[I + i];
+    if (dhprev.data) for (int i = 0; i < H; ++i) dhprev.data[i] = dhp_acc[i];
+    if (dhp_acc != dhp) free(dhp_acc);
+}
+void gru_free(GRU *g) {
+    linear_free(&g->lr); linear_free(&g->lu); linear_free(&g->ln);
+    for (int s = 0; s < g->max_steps; ++s) {
+        mat_free(&g->zruc[s]); mat_free(&g->znc[s]); mat_free(&g->rc[s]);
+        mat_free(&g->uc[s]); mat_free(&g->nc[s]); mat_free(&g->hpc[s]);
+    }
+    free(g->zruc); free(g->znc); free(g->rc); free(g->uc); free(g->nc); free(g->hpc);
+    mat_free(&g->s_dzru); mat_free(&g->s_dzn); mat_free(&g->s_dg);
+}
+
 /* ---- softmax over rows (in place) ----------------------------------- */
 static void softmax_rows(Mat m) {
     for (int i = 0; i < m.rows; ++i) {

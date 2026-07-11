@@ -88,6 +88,23 @@ void ffn_forward(FFN *ff, const Mat x, Mat y);
 void ffn_backward(FFN *ff, const Mat dy, Mat dx);
 void ffn_free(FFN *ff);
 
+/* ---- GRU cell:  h_t = GRU(x_t, h_{t-1}) ----------------------------- */
+/* Gated recurrent unit, built from three Linear gates (reset/update/candidate):
+ *   r = σ(Lr[x;h]),  u = σ(Lu[x;h]),  n = tanh(Ln[x; r⊙h]),  h' = (1-u)⊙n + u⊙h
+ * Per-step forward state is cached in arrays sized to max_steps so the
+ * autoregressive rollout can back-propagate through the whole sequence. */
+typedef struct {
+    int    in, hid, max_steps;
+    Linear lr, lu, ln;                       /* reset, update, candidate gates */
+    Mat   *zruc, *znc, *rc, *uc, *nc, *hpc;  /* per-step caches [1,·]          */
+    Mat    s_dzru, s_dzn, s_dg;              /* backward scratch               */
+} GRU;
+GRU  gru_new(int in, int hid, int max_steps, ParamList *pl, const char *name);
+void gru_forward(GRU *g, int step, const Mat x, const Mat hprev, Mat hout);
+/* Accumulates gate grads; writes dx and dhprev (either may be a NULL matrix). */
+void gru_backward(GRU *g, int step, const Mat dh, Mat dx, Mat dhprev);
+void gru_free(GRU *g);
+
 /* ---- Multi-head self-attention over a sequence [S,D] ---------------- */
 typedef struct {
     int    d_model, n_heads, head_dim;

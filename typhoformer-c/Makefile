@@ -38,7 +38,7 @@ OBJ     := $(SRC:.c=.o) $(TENSOR_OBJ)
 
 TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data \
            tests/test_golden tests/test_module tests/test_parallel \
-           tests/test_checkpoint tests/test_npy tests/test_dropout
+           tests/test_checkpoint tests/test_npy tests/test_dropout tests/test_gru
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
 .PHONY: all lib test test-san test-valgrind test-opencl clean

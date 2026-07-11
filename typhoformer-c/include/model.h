@@ -73,11 +73,13 @@ void model_set_pool_last(int on);    /* pool by taking the last step, not TimeMi
 
 /* ---- Autoregressive decoder ----------------------------------------- */
 typedef struct {
-    Linear fc1, fc2;
-    int    hidden, out, max_steps, use_cv;
+    Linear fc1, fc2;                    /* MLP correction (plain/delta/cv modes) */
+    GRU    gru; Linear fc_out;          /* recurrent correction (--gru mode)     */
+    int    hidden, out, max_steps, use_cv, use_gru;
     Mat   *zc, *h1c, *ac;               /* per-step caches (autoregressive rollout) */
     Mat    s_yt, s_a, s_ytn, s_v;       /* forward scratch (s_v: cv velocity) */
     Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dvnext, s_dhacc;  /* backward scratch */
+    Mat    s_hid0, s_dhid, s_dhc, s_dx2;  /* gru scratch (initial hidden, hidden grads, dx) */
 } Decoder;
 Decoder decoder_new(const Config *c, ParamList *pl);
 /* vseed is the seed velocity (normalized coord units); used only in cv mode and
@@ -101,6 +103,13 @@ int     model_delta(void);
  * BEFORE building the model; feed each sample's seed velocity with
  * model_set_seed_velocity. Off by default; takes precedence over --delta. */
 void    model_set_cv(int on);
+
+/* Recurrent decoder: the constant-velocity rollout's curvature correction is
+ * produced by a GRU whose hidden state is carried across steps (initialised from
+ * the encoder context), instead of a memoryless per-step MLP. Gives the
+ * multi-step rollout real memory. Implies --cv anchoring; fc_out zero-init so it
+ * still starts at CLIPER. Set BEFORE model_new. Off by default. */
+void    model_set_gru(int on);
 
 /* ---- Co-active spatial cross-attention ------------------------------ */
 /* The encoded context attends over the relative states of storms active at the
