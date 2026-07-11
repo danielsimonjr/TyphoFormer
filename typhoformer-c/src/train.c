@@ -45,11 +45,13 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
     Mat xn = mat_new(d->in_len, d->d_num), xt = mat_new(d->in_len, d->d_text);
     Mat yp = mat_new(1, 2), Y = mat_new(d->pred_len, 2);
     Mat nbr = mat_new(TF_NBR_K, TF_NBR_NF);
+    Mat vel = mat_new(1, 2);
     Eval e; memset(&e, 0, sizeof e); e.H = H;
     for (int i = 0; i < n; ++i) {
         int s = idx ? idx[i] : i;
         dataset_get(d, s, xn, xt, yp, Y);
         int nc; dataset_neighbors(d, s, nbr, &nc); model_set_neighbors(m, nbr, nc);
+        dataset_seed_velocity(d, s, vel); model_set_seed_velocity(m, vel);
         model_forward(m, xn, xt, yp);
         float seed[2] = { yp.data[0], yp.data[1] };
         dataset_denorm(d, seed);                        /* coords back to degrees for metrics */
@@ -67,7 +69,7 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
         e.mmae += e.mae[h]; e.mkm += e.km[h]; e.mbase += e.base_km[h];
     }
     e.mmae /= H; e.mkm /= H; e.mbase /= H;
-    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&nbr);
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&nbr); mat_free(&vel);
     return e;
 }
 
@@ -100,6 +102,7 @@ static int cmd_train(int argc, char **argv) {
     int no_text = 0;                  /* numbers-only ablation             */
     int motion = 0;                   /* add position+velocity input features */
     int delta = 0;                    /* decoder predicts displacement     */
+    int cv = 0;                       /* constant-velocity decoder (2nd order) */
     int km_loss = 0;                  /* weight longitude error by cos^2(lat) */
     int no_spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
     unsigned long seed = 20260711, split_seed = 42;
@@ -129,6 +132,7 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no_text"))        no_text = 1;
         else if (!strcmp(argv[i], "--motion"))         motion = 1;
         else if (!strcmp(argv[i], "--delta"))          delta = 1;
+        else if (!strcmp(argv[i], "--cv"))             cv = 1;
         else if (!strcmp(argv[i], "--km_loss"))        km_loss = 1;
         else if (!strcmp(argv[i], "--no_spatial"))     no_spatial = 1;
         else if (!strcmp(argv[i], "--posenc"))         posenc = 1;
@@ -169,15 +173,18 @@ static int cmd_train(int argc, char **argv) {
     printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu | d_num=%d%s%s\n",
            ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed, ds.d_num,
            motion ? " (+motion)" : "", no_text ? " | NO-TEXT" : "");
-    if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
+    if (cv)         printf("decoder: constant-velocity mode (anchor at CLIPER, learn curvature)\n");
+    else if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
     if (km_loss && threads > 1) printf("note: --km_loss applies on the serial path; use --threads=1\n");
 
     if (threads < 1) threads = 1;
     /* architecture options — all set BEFORE model_new (they change the param set) */
-    if (delta) model_set_delta(1);
+    if (cv)         model_set_cv(1);          /* cv is a superset of delta; takes precedence */
+    else if (delta) model_set_delta(1);
     model_set_no_spatial(no_spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
     nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
     if (co_spatial && threads > 1) printf("note: --co_spatial applies on the serial path; use --threads=1\n");
+    if (cv && threads > 1) printf("note: --cv applies on the serial path; use --threads=1\n");
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
     Adam opt = adam_new(&pl, lr, wd);
@@ -198,6 +205,7 @@ static int cmd_train(int argc, char **argv) {
     Mat yp = mat_new(1, 2), Y = mat_new(c.pred_len, 2);
     Mat dpred = mat_new(c.pred_len, c.out_dim), dgate = mat_new(c.in_len, c.d_model);
     Mat nbr = mat_new(TF_NBR_K, TF_NBR_NF);
+    Mat vel = mat_new(1, 2);
 
     Eval e0 = evaluate(&m, &ds, val, nva);
     printf("epoch  0 (init)          | val MAE %.4f | val dR %.2f km  (persistence %.2f km)\n",
@@ -220,6 +228,7 @@ static int cmd_train(int argc, char **argv) {
                 for (int k = 0; k < bs; ++k) {
                     dataset_get(&ds, train[b + k], xn, xt, yp, Y);
                     if (co_spatial) { int nc; dataset_neighbors(&ds, train[b + k], nbr, &nc); model_set_neighbors(&m, nbr, nc); }
+                    if (cv) { dataset_seed_velocity(&ds, train[b + k], vel); model_set_seed_velocity(&m, vel); }
                     model_forward(&m, xn, xt, yp);
                     bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
                     if (km_loss) {                       /* equirectangular: down-weight lon by cos^2(lat) */
@@ -267,7 +276,7 @@ static int cmd_train(int argc, char **argv) {
         print_horizons(&te);
     }
 
-    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate); mat_free(&nbr);
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate); mat_free(&nbr); mat_free(&vel);
     if (pt) partrainer_free(pt);
     split_free(&sp); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
     return 0;
@@ -295,6 +304,7 @@ static int cmd_eval(int argc, char **argv) {
         else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
         else if (!strcmp(argv[i], "--no_text"))       no_text = 1;
         else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
+        else if (!strcmp(argv[i], "--cv"))            model_set_cv(1);
         else if (!strcmp(argv[i], "--no_spatial"))    model_set_no_spatial(1);
         else if (!strcmp(argv[i], "--posenc"))        model_set_posenc(1);
         else if (!strcmp(argv[i], "--pool=last"))     model_set_pool_last(1);

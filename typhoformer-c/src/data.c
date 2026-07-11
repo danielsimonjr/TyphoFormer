@@ -279,6 +279,18 @@ void dataset_neighbors(const Dataset *d, int s, Mat nbrmat, int *cnt) {
            (size_t)TF_NBR_K * TF_NBR_NF * sizeof(float));
 }
 
+/* Seed velocity = the last observed step's displacement, in NORMALIZED coord
+ * units (so it adds directly to the normalized seed the decoder rolls out from).
+ * A difference of two coordinates, so the coordinate mean cancels and only the
+ * per-axis std divides. The .tfb path carries no coord history -> zero. */
+void dataset_seed_velocity(const Dataset *d, int s, Mat vout) {
+    vout.data[0] = vout.data[1] = 0.0f;
+    if (d->prewindowed || d->in_len < 2) return;
+    int last = d->start[s] + d->in_len - 1;           /* seed record */
+    vout.data[0] = (d->lat[last] - d->lat[last - 1]) / d->cstd[0];
+    vout.data[1] = (d->lon[last] - d->lon[last - 1]) / d->cstd[1];
+}
+
 void dataset_standardize(Dataset *d) {
     if (d->prewindowed) return;                    /* bin path standardizes itself */
     char *use = (char *)malloc((size_t)d->n_records);

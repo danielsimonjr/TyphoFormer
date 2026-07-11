@@ -17,6 +17,11 @@ static int g_delta = 0;
 void model_set_delta(int on) { g_delta = on; }
 int  model_delta(void) { return g_delta; }
 
+/* Constant-velocity decoder (2nd-order: anchor at CLIPER, learn the curvature
+ * correction). Off by default; takes precedence over delta when both are set. */
+static int g_cv = 0;
+void model_set_cv(int on) { g_cv = on; }
+
 /* Encoder architecture options (read at encoder_new time). Off by default. */
 static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0, g_co_spatial = 0;
 void model_set_no_spatial(int on) { g_no_spatial = on; }
@@ -196,23 +201,56 @@ void encoder_free(Encoder *e) {
  * ===================================================================== */
 Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
-    d.fc1 = linear_new(c->d_model + c->out_dim, c->d_model, pl, "dec.fc1");
+    d.use_cv = g_cv;
+    /* cv mode also feeds the current velocity, so fc1's input is [h; y_prev; v]. */
+    int fc1_in = c->d_model + c->out_dim + (g_cv ? c->out_dim : 0);
+    d.fc1 = linear_new(fc1_in, c->d_model, pl, "dec.fc1");
     d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
-    if (g_delta) {                                   /* start at persistence (zero delta) */
+    if (g_delta || g_cv) {          /* start at persistence (delta) / const-velocity (cv) */
         memset(d.fc2.W.data, 0, (size_t)d.fc2.out * d.fc2.in * sizeof(float));
         memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
     }
     d.zc  = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.h1c = (Mat *)calloc(d.max_steps, sizeof(Mat));
     d.ac  = (Mat *)calloc(d.max_steps, sizeof(Mat));
-    d.s_yt = NULLMAT; d.s_a = NULLMAT; d.s_ytn = NULLMAT;
+    d.s_yt = NULLMAT; d.s_a = NULLMAT; d.s_ytn = NULLMAT; d.s_v = NULLMAT;
     d.s_da = NULLMAT; d.s_dh1 = NULLMAT; d.s_dz = NULLMAT;
-    d.s_dyt = NULLMAT; d.s_dynext = NULLMAT; d.s_dhacc = NULLMAT;
+    d.s_dyt = NULLMAT; d.s_dynext = NULLMAT; d.s_dvnext = NULLMAT; d.s_dhacc = NULLMAT;
     return d;
 }
-void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat preds) {
+void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vseed, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
     assert(steps <= d->max_steps);
+    if (d->use_cv) {
+        /* Constant-velocity rollout: state (p = y_prev, v = velocity).
+         *   z    = [h ; p ; v]
+         *   c    = fc2(relu(fc1(z)))            (learned curvature correction)
+         *   ŷ_s  = p + v + c                    (== p at next step)
+         *   v   += c,  p = ŷ_s                  (v_{s+1}=v_s+c ; p_{s+1}=ŷ_s)
+         * fc2 zero-init -> ŷ starts at p+v = constant-velocity extrapolation. */
+        const int Z = H + 2 * O;
+        ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O); ensure(&d->s_v, 1, O);
+        Mat p = d->s_yt, a = d->s_a, c = d->s_ytn, v = d->s_v;
+        mat_copy(p, yprev);
+        if (vseed.data) mat_copy(v, vseed); else mat_zero(v);
+        for (int s = 0; s < steps; ++s) {
+            ensure(&d->zc[s], 1, Z); ensure(&d->h1c[s], 1, H); ensure(&d->ac[s], 1, H);
+            memcpy(&d->zc[s].data[0],     henc.data, H * sizeof(float));   /* z = [h ; p ; v] */
+            memcpy(&d->zc[s].data[H],     p.data,    O * sizeof(float));
+            memcpy(&d->zc[s].data[H + O], v.data,    O * sizeof(float));
+            linear_forward(&d->fc1, d->zc[s], d->h1c[s]);
+            mat_copy(a, d->h1c[s]); mat_relu(a);
+            mat_copy(d->ac[s], a);
+            linear_forward(&d->fc2, a, c);                                /* correction */
+            for (int i = 0; i < O; ++i) {
+                float y = p.data[i] + v.data[i] + c.data[i];
+                v.data[i] += c.data[i];
+                p.data[i]  = y;
+                preds.data[s * O + i] = y;
+            }
+        }
+        return;
+    }
     ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O);
     Mat yt = d->s_yt, a = d->s_a, ytn = d->s_ytn;
     mat_copy(yt, yprev);
@@ -233,6 +271,39 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat
  * next step's decoder input, so gradients from step s+1 flow back into it. */
 void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     const int H = d->hidden, O = d->out, steps = dpreds.rows;
+    if (d->use_cv) {
+        /* Backward of the constant-velocity recurrence. Grads on the state
+         * entering step s (dp, dv) and on the correction output (dc):
+         *   dc_s = g_s + dp_next + dv_next          (c feeds pred, p_{s+1}, v_{s+1})
+         *   dp_s = g_s + dp_next        + dp_net     (p feeds pred, p_{s+1}, network)
+         *   dv_s = g_s + dp_next + dv_next + dv_net  (v feeds pred, p_{s+1}, v_{s+1}, net)
+         * where [dhenc | dp_net | dv_net] = fc1 backward of z = [h; p; v]. */
+        ensure(&d->s_da, 1, H); ensure(&d->s_dh1, 1, H); ensure(&d->s_dz, 1, H + 2 * O);
+        ensure(&d->s_dyt, 1, O); ensure(&d->s_dynext, 1, O); ensure(&d->s_dvnext, 1, O);
+        ensure(&d->s_dhacc, 1, H);
+        Mat da = d->s_da, dh1 = d->s_dh1, dz = d->s_dz;
+        Mat dc = d->s_dyt, dpnext = d->s_dynext, dvnext = d->s_dvnext;
+        mat_zero(d->s_dhacc); mat_zero(dpnext); mat_zero(dvnext);
+        for (int s = steps - 1; s >= 0; --s) {
+            for (int i = 0; i < O; ++i)
+                dc.data[i] = dpreds.data[s * O + i] + dpnext.data[i] + dvnext.data[i];
+            mat_copy(d->fc2.xcache, d->ac[s]);
+            linear_backward(&d->fc2, dc, da);
+            for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[s].data[i] > 0.0f) ? da.data[i] : 0.0f;
+            mat_copy(d->fc1.xcache, d->zc[s]);
+            linear_backward(&d->fc1, dh1, dz);
+            for (int i = 0; i < H; ++i) d->s_dhacc.data[i] += dz.data[i];        /* h feeds every step */
+            for (int i = 0; i < O; ++i) {
+                float gs = dpreds.data[s * O + i];
+                float dp_old = dpnext.data[i], dv_old = dvnext.data[i];
+                float dp_net = dz.data[H + i], dv_net = dz.data[H + O + i];
+                dpnext.data[i] = gs + dp_old + dp_net;                   /* dp_s */
+                dvnext.data[i] = gs + dp_old + dv_old + dv_net;          /* dv_s */
+            }
+        }
+        memcpy(dhenc.data, d->s_dhacc.data, H * sizeof(float));
+        return;
+    }
     ensure(&d->s_da, 1, H); ensure(&d->s_dh1, 1, H); ensure(&d->s_dz, 1, H + O);
     ensure(&d->s_dyt, 1, O); ensure(&d->s_dynext, 1, O); ensure(&d->s_dhacc, 1, H);
     Mat da = d->s_da, dh1 = d->s_dh1, dz = d->s_dz, dyt = d->s_dyt, dynext = d->s_dynext;
@@ -256,9 +327,9 @@ void decoder_free(Decoder *d) {
     linear_free(&d->fc1); linear_free(&d->fc2);
     for (int s = 0; s < d->max_steps; ++s) { mat_free(&d->zc[s]); mat_free(&d->h1c[s]); mat_free(&d->ac[s]); }
     free(d->zc); free(d->h1c); free(d->ac);
-    mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn);
+    mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn); mat_free(&d->s_v);
     mat_free(&d->s_da); mat_free(&d->s_dh1); mat_free(&d->s_dz);
-    mat_free(&d->s_dyt); mat_free(&d->s_dynext); mat_free(&d->s_dhacc);
+    mat_free(&d->s_dyt); mat_free(&d->s_dynext); mat_free(&d->s_dvnext); mat_free(&d->s_dhacc);
 }
 
 /* =====================================================================
@@ -325,6 +396,7 @@ Model model_new(const Config *c, ParamList *pl) {
     if (m.use_co) m.co = cospatial_new(TF_NBR_NF, c->d_model, pl);
     m.dec = decoder_new(c, pl);
     m.nbr = mat_new(TF_NBR_K, TF_NBR_NF); m.nbr_cnt = 0;
+    m.vseed = mat_new(1, c->out_dim); mat_zero(m.vseed);
     m.xtilde  = mat_new(c->in_len, c->d_model);
     m.henc    = mat_new(1, c->d_model);
     m.henc2   = mat_new(1, c->d_model);
@@ -337,12 +409,15 @@ Model model_new(const Config *c, ParamList *pl) {
 void model_set_neighbors(Model *m, const Mat nbr, int cnt) {
     mat_copy(m->nbr, nbr); m->nbr_cnt = cnt;
 }
+void model_set_seed_velocity(Model *m, const Mat v) {
+    mat_copy(m->vseed, v);
+}
 void model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev) {
     pgf_forward(&m->pgf, xnum, xtext, m->xtilde);
     encoder_forward(&m->enc, m->xtilde, m->henc);
     Mat ctx = m->henc;
     if (m->use_co) { cospatial_forward(&m->co, m->henc, m->nbr, m->nbr_cnt, m->henc2); ctx = m->henc2; }
-    decoder_forward(&m->dec, ctx, yprev, m->cfg.pred_len, m->pred);
+    decoder_forward(&m->dec, ctx, yprev, m->vseed, m->cfg.pred_len, m->pred);
 }
 void model_backward(Model *m, const Mat dpred, const Mat dgate_pen) {
     if (m->use_co) {
@@ -357,7 +432,7 @@ void model_backward(Model *m, const Mat dpred, const Mat dgate_pen) {
 void model_free(Model *m) {
     pgf_free(&m->pgf); encoder_free(&m->enc); decoder_free(&m->dec);
     if (m->use_co) cospatial_free(&m->co);
-    mat_free(&m->nbr);
+    mat_free(&m->nbr); mat_free(&m->vseed);
     mat_free(&m->xtilde); mat_free(&m->henc); mat_free(&m->henc2);
     mat_free(&m->dhenc); mat_free(&m->dhenc2);
     mat_free(&m->dxtilde); mat_free(&m->pred);

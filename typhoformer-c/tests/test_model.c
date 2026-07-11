@@ -40,6 +40,12 @@ static int check_model(const char *label, int pred_len) {
         for (int i = 0; i < TF_NBR_K * TF_NBR_NF; ++i) nbr.data[i] = nn_uniform(-1, 1);
         model_set_neighbors(&M, nbr, 2);
     }
+    /* cv decoder needs a (fixed) seed velocity fed before every forward. */
+    Mat vel = mat_new(1, c.out_dim);
+    if (M.dec.use_cv) {
+        for (int i = 0; i < c.out_dim; ++i) vel.data[i] = nn_uniform(-1, 1);
+        model_set_seed_velocity(&M, vel);
+    }
 
     xnum  = mat_new(c.in_len, c.d_num);
     xtext = mat_new(c.in_len, c.d_text);
@@ -82,7 +88,7 @@ static int check_model(const char *label, int pred_len) {
 
     model_free(&M); plist_free(&pl);
     mat_free(&xnum); mat_free(&xtext); mat_free(&yprev); mat_free(&Y);
-    mat_free(&dpred); mat_free(&dgate); mat_free(&nbr);
+    mat_free(&dpred); mat_free(&dgate); mat_free(&nbr); mat_free(&vel);
     return fail;
 }
 
@@ -95,6 +101,10 @@ int main(void) {
     fail |= check_model("delta", 1);
     fail |= check_model("delta+multistep", 3);
     model_set_delta(0);
+    model_set_cv(1);
+    fail |= check_model("cv", 1);
+    fail |= check_model("cv+multistep", 3);
+    model_set_cv(0);
     /* encoder architecture variants (each set, checked, reset) */
     model_set_no_spatial(1); fail |= check_model("no_spatial", 1); model_set_no_spatial(0);
     model_set_posenc(1);     fail |= check_model("posenc", 1);     model_set_posenc(0);
