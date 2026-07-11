@@ -90,9 +90,31 @@ python tools/npy_dict_to_bin.py ../data/val ../data/val.tfb
 
 ### Performance
 
-Math is hand-written and cache-blocked (`ikj`/`pij` loop orders), built at
-`-O3`. The compact demo config runs ~6 s/epoch and the full 5.1 M-parameter
-config ~190 s/epoch, single-threaded, on the bundled data.
+Math is hand-written and cache-blocked (`ikj`/`pij` loop orders, `restrict`
+pointers), built at `-O3`. Backward passes reuse persistent per-module scratch
+buffers, so training does no per-step heap allocation.
+
+| Build | Compact config | Full paper config (5.1 M params) |
+|:--|:--:|:--:|
+| `make` (portable `-O3`) | ~3 s/epoch | ~190 s/epoch |
+| `make NATIVE=1` (`-march=native`) | ~3 s/epoch | **~99 s/epoch** |
+
+Single-threaded on CPU; native SIMD roughly halves the full-config epoch time.
+
+## Development
+
+| Target | What it does |
+|:--|:--|
+| `make` | Build `./typhoformer` (portable `-O3`). |
+| `make test` | Build + run all unit tests (gradient checks + data loader). |
+| `make test-san` | Rebuild with **AddressSanitizer + UBSan** and run the tests. |
+| `make NATIVE=1` | Build with `-march=native -funroll-loops` (faster, non-portable binary). |
+| `make clean` | Remove build artifacts. |
+
+The code builds warning-clean under `-Wall -Wextra -Wpedantic`, is
+AddressSanitizer/UBSan-clean across all runtime paths, and is exercised in CI
+(`.github/workflows/c-ci.yml`: build, unit tests, sanitizer tests, and a
+train/eval/prepare smoke test).
 
 ## Status — complete
 

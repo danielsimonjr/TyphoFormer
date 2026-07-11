@@ -16,24 +16,24 @@
 /* ---- .npy (v1.0/2.0) 2-D float32 loader ----------------------------- */
 float *npy_load_2d(const char *path, int *rows, int *cols) {
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(1); }
+    if (!f) { die("cannot open %s", path); }
     unsigned char h[8];
     if (fread(h, 1, 8, f) != 8 || h[0] != 0x93 || memcmp(h + 1, "NUMPY", 5)) {
-        fprintf(stderr, "%s: not a .npy file\n", path); exit(1);
+        die("%s: not a .npy file", path);
     }
     unsigned int hlen;
-    if (h[6] == 1) { unsigned char b[2]; if(fread(b,1,2,f)!=2){exit(1);} hlen = b[0] | (b[1] << 8); }
-    else           { unsigned char b[4]; if(fread(b,1,4,f)!=4){exit(1);} hlen = b[0] | (b[1]<<8) | (b[2]<<16) | ((unsigned)b[3]<<24); }
+    if (h[6] == 1) { unsigned char b[2]; if(fread(b,1,2,f)!=2)die("%s: unexpected end of file", path); hlen = b[0] | (b[1] << 8); }
+    else           { unsigned char b[4]; if(fread(b,1,4,f)!=4)die("%s: unexpected end of file", path); hlen = b[0] | (b[1]<<8) | (b[2]<<16) | ((unsigned)b[3]<<24); }
     char *hdr = (char *)malloc(hlen + 1);
-    if (fread(hdr, 1, hlen, f) != hlen) { exit(1); }
+    if (fread(hdr, 1, hlen, f) != hlen) die("%s: unexpected end of file", path);
     hdr[hlen] = 0;
-    if (!strstr(hdr, "f4")) { fprintf(stderr, "%s: expected float32\n", path); exit(1); }
+    if (!strstr(hdr, "f4")) { die("%s: expected float32", path); }
     char *s = strstr(hdr, "'shape':"); assert(s); s = strchr(s, '(');
     int r = 0, c = 0;
-    if (sscanf(s, "(%d, %d", &r, &c) != 2) { fprintf(stderr, "%s: bad shape\n", path); exit(1); }
+    if (sscanf(s, "(%d, %d", &r, &c) != 2) { die("%s: bad shape", path); }
     free(hdr);
     float *data = (float *)malloc((size_t)r * c * sizeof(float));
-    if (fread(data, sizeof(float), (size_t)r * c, f) != (size_t)r * c) { exit(1); }
+    if (fread(data, sizeof(float), (size_t)r * c, f) != (size_t)r * c) die("%s: unexpected end of file", path);
     fclose(f);
     *rows = r; *cols = c;
     return data;
@@ -76,7 +76,7 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
 
     /* ---- CSV ---- */
     FILE *f = fopen(csv, "r");
-    if (!f) { fprintf(stderr, "cannot open %s\n", csv); exit(1); }
+    if (!f) { die("cannot open %s", csv); }
     int cap = 4096; d.num = malloc((size_t)cap * d.d_num * sizeof(float));
     d.lat = malloc(cap * sizeof(float)); d.lon = malloc(cap * sizeof(float));
     d.gid = malloc(cap * sizeof(int));
@@ -109,7 +109,7 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
 
     /* ---- embeddings ---- */
     struct dirent **names; int nc = scandir(embdir, &names, emb_name_filter, alphasort);
-    if (nc <= 0) { fprintf(stderr, "no emb_chunk_*.npy in %s\n", embdir); exit(1); }
+    if (nc <= 0) { die("no emb_chunk_*.npy in %s", embdir); }
     d.emb = malloc((size_t)n * d.d_text * sizeof(float));
     int got = 0;
     for (int i = 0; i < nc; ++i) {
@@ -121,7 +121,7 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
         got += r; free(chunk); free(names[i]);
     }
     free(names);
-    if (got != n) { fprintf(stderr, "embeddings (%d) != records (%d)\n", got, n); exit(1); }
+    if (got != n) { die("embeddings (%d) != records (%d)", got, n); }
 
     /* ---- standardize numerical features (z-score per column) ---- */
     for (int j = 0; j < d.d_num; ++j) {
@@ -144,10 +144,10 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
 Dataset dataset_load_bin(const char *path) {
     Dataset d; memset(&d, 0, sizeof(d));
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(1); }
+    if (!f) { die("cannot open %s", path); }
     char magic[4]; int hdr[5];
-    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "TFB1", 4)) { fprintf(stderr, "%s: bad magic\n", path); exit(1); }
-    if (fread(hdr, sizeof(int), 5, f) != 5) { exit(1); }
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "TFB1", 4)) { die("%s: bad magic", path); }
+    if (fread(hdr, sizeof(int), 5, f) != 5) die("%s: unexpected end of file", path);
     d.n_samples = hdr[0]; d.in_len = hdr[1];
     int feat = hdr[2]; d.pred_len = hdr[3]; int out = hdr[4];
     d.d_num = 14; d.d_text = feat - d.d_num; d.prewindowed = 1;
@@ -156,8 +156,8 @@ Dataset dataset_load_bin(const char *path) {
     d.win_in = malloc((size_t)d.n_samples * in_sz * sizeof(float));
     d.win_tg = malloc((size_t)d.n_samples * tg_sz * sizeof(float));
     for (int s = 0; s < d.n_samples; ++s) {
-        if (fread(&d.win_in[s * in_sz], sizeof(float), in_sz, f) != in_sz) { exit(1); }
-        if (fread(&d.win_tg[s * tg_sz], sizeof(float), tg_sz, f) != tg_sz) { exit(1); }
+        if (fread(&d.win_in[s * in_sz], sizeof(float), in_sz, f) != in_sz) die("%s: unexpected end of file", path);
+        if (fread(&d.win_tg[s * tg_sz], sizeof(float), tg_sz, f) != tg_sz) die("%s: unexpected end of file", path);
     }
     fclose(f);
     /* standardize the numerical feature columns (0..d_num-1) across all steps */

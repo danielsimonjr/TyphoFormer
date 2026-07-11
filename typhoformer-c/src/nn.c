@@ -153,6 +153,7 @@ FFN ffn_new(int d, int f, ParamList *pl, const char *name) {
     ff.fc1 = linear_new(d, f, pl, name);
     ff.fc2 = linear_new(f, d, pl, name);
     ff.h = (Mat){0,0,NULL}; ff.a = (Mat){0,0,NULL};
+    ff.s_da = (Mat){0,0,NULL}; ff.s_dh = (Mat){0,0,NULL};
     return ff;
 }
 void ffn_forward(FFN *ff, const Mat x, Mat y) {
@@ -164,13 +165,16 @@ void ffn_forward(FFN *ff, const Mat x, Mat y) {
 }
 void ffn_backward(FFN *ff, const Mat dy, Mat dx) {
     const int T = dy.rows;
-    Mat da = mat_new(T, ff->f), dh = mat_new(T, ff->f);
+    ensure(&ff->s_da, T, ff->f); ensure(&ff->s_dh, T, ff->f);
+    Mat da = ff->s_da, dh = ff->s_dh;
     linear_backward(&ff->fc2, dy, da);
     for (int i = 0; i < T * ff->f; ++i) dh.data[i] = (ff->h.data[i] > 0.0f) ? da.data[i] : 0.0f;
     linear_backward(&ff->fc1, dh, dx);
-    mat_free(&da); mat_free(&dh);
 }
-void ffn_free(FFN *ff) { linear_free(&ff->fc1); linear_free(&ff->fc2); mat_free(&ff->h); mat_free(&ff->a); }
+void ffn_free(FFN *ff) {
+    linear_free(&ff->fc1); linear_free(&ff->fc2);
+    mat_free(&ff->h); mat_free(&ff->a); mat_free(&ff->s_da); mat_free(&ff->s_dh);
+}
 
 /* ---- softmax over rows (in place) ----------------------------------- */
 static void softmax_rows(Mat m) {
@@ -195,6 +199,9 @@ MHA mha_new(int d_model, int n_heads, int self_only, ParamList *pl, const char *
     m.o = linear_new(d_model, d_model, pl, name);
     m.Q = (Mat){0,0,NULL}; m.K = (Mat){0,0,NULL}; m.V = (Mat){0,0,NULL}; m.Ocat = (Mat){0,0,NULL};
     m.P = (Mat *)calloc(n_heads, sizeof(Mat)); m.Scap = 0;
+    m.s_dOcat = (Mat){0,0,NULL}; m.s_dQ = (Mat){0,0,NULL}; m.s_dK = (Mat){0,0,NULL};
+    m.s_dV = (Mat){0,0,NULL}; m.s_dxq = (Mat){0,0,NULL}; m.s_dxk = (Mat){0,0,NULL};
+    m.s_dP = (Mat){0,0,NULL}; m.s_dsc = (Mat){0,0,NULL};
     return m;
 }
 void mha_forward(MHA *m, const Mat x, Mat y) {
@@ -235,15 +242,16 @@ void mha_forward(MHA *m, const Mat x, Mat y) {
 void mha_backward(MHA *m, const Mat dy, Mat dx) {
     const int S = dy.rows, D = m->d_model, H = m->n_heads, hd = m->head_dim;
     const float scale = 1.0f / sqrtf((float)hd);
-    Mat dOcat = mat_new(S, D);
+    ensure(&m->s_dOcat, S, D);
+    Mat dOcat = m->s_dOcat;
     linear_backward(&m->o, dy, dOcat);
     if (m->self_only) {                     /* dOcat == dV; q,k carry no grad */
         linear_backward(&m->v, dOcat, dx);
-        mat_free(&dOcat);
         return;
     }
-    Mat dQ = mat_new(S, D), dK = mat_new(S, D), dV = mat_new(S, D);
-    Mat dP = mat_new(S, S), dsc = mat_new(S, S);
+    ensure(&m->s_dQ, S, D); ensure(&m->s_dK, S, D); ensure(&m->s_dV, S, D);
+    ensure(&m->s_dP, S, S); ensure(&m->s_dsc, S, S);
+    Mat dQ = m->s_dQ, dK = m->s_dK, dV = m->s_dV, dP = m->s_dP, dsc = m->s_dsc;
     for (int h = 0; h < H; ++h) {
         const int off = h * hd;
         Mat P = m->P[h];
@@ -281,19 +289,20 @@ void mha_backward(MHA *m, const Mat dy, Mat dx) {
                 dK.data[j * D + off + d] = acc;
             }
     }
-    Mat dxq = mat_new(S, D), dxk = mat_new(S, D);
+    ensure(&m->s_dxq, S, D); ensure(&m->s_dxk, S, D);
+    Mat dxq = m->s_dxq, dxk = m->s_dxk;
     linear_backward(&m->q, dQ, dxq);
     linear_backward(&m->k, dK, dxk);
     linear_backward(&m->v, dV, dx);          /* dx starts as v's contribution */
     for (int i = 0; i < S * D; ++i) dx.data[i] += dxq.data[i] + dxk.data[i];
-    mat_free(&dOcat); mat_free(&dQ); mat_free(&dK); mat_free(&dV);
-    mat_free(&dP); mat_free(&dsc); mat_free(&dxq); mat_free(&dxk);
 }
 void mha_free(MHA *m) {
     linear_free(&m->q); linear_free(&m->k); linear_free(&m->v); linear_free(&m->o);
     mat_free(&m->Q); mat_free(&m->K); mat_free(&m->V); mat_free(&m->Ocat);
     for (int h = 0; h < m->n_heads; ++h) mat_free(&m->P[h]);
     free(m->P);
+    mat_free(&m->s_dOcat); mat_free(&m->s_dQ); mat_free(&m->s_dK); mat_free(&m->s_dV);
+    mat_free(&m->s_dxq); mat_free(&m->s_dxk); mat_free(&m->s_dP); mat_free(&m->s_dsc);
 }
 
 /* ---- Transformer block (post-norm) ---------------------------------- */
@@ -305,6 +314,8 @@ Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *
     b.ff = ffn_new(d_model, ff_dim, pl, name);
     b.attn_out = (Mat){0,0,NULL}; b.r1 = (Mat){0,0,NULL}; b.y1 = (Mat){0,0,NULL};
     b.ff_out = (Mat){0,0,NULL}; b.r2 = (Mat){0,0,NULL};
+    b.s_dr2 = (Mat){0,0,NULL}; b.s_dy1 = (Mat){0,0,NULL};
+    b.s_dr1 = (Mat){0,0,NULL}; b.s_dtmp = (Mat){0,0,NULL};
     return b;
 }
 void block_forward(Block *b, const Mat x, Mat y) {
@@ -320,16 +331,17 @@ void block_forward(Block *b, const Mat x, Mat y) {
 }
 void block_backward(Block *b, const Mat dy, Mat dx) {
     const int S = dy.rows, D = b->d;
-    Mat dr2 = mat_new(S, D), dy1 = mat_new(S, D), dr1 = mat_new(S, D), dtmp = mat_new(S, D);
+    ensure(&b->s_dr2, S, D); ensure(&b->s_dy1, S, D); ensure(&b->s_dr1, S, D); ensure(&b->s_dtmp, S, D);
+    Mat dr2 = b->s_dr2, dy1 = b->s_dy1, dr1 = b->s_dr1, dtmp = b->s_dtmp;
     layernorm_backward(&b->ln2, dy, dr2);            /* y = LN2(r2) */
     ffn_backward(&b->ff, dr2, dy1);                  /* r2 = y1 + ff(y1) */
     for (int i = 0; i < S * D; ++i) dy1.data[i] += dr2.data[i];
     layernorm_backward(&b->ln1, dy1, dr1);           /* y1 = LN1(r1) */
     mha_backward(&b->attn, dr1, dtmp);               /* r1 = x + attn(x) */
     for (int i = 0; i < S * D; ++i) dx.data[i] = dr1.data[i] + dtmp.data[i];
-    mat_free(&dr2); mat_free(&dy1); mat_free(&dr1); mat_free(&dtmp);
 }
 void block_free(Block *b) {
     mha_free(&b->attn); layernorm_free(&b->ln1); layernorm_free(&b->ln2); ffn_free(&b->ff);
     mat_free(&b->attn_out); mat_free(&b->r1); mat_free(&b->y1); mat_free(&b->ff_out); mat_free(&b->r2);
+    mat_free(&b->s_dr2); mat_free(&b->s_dy1); mat_free(&b->s_dr1); mat_free(&b->s_dtmp);
 }

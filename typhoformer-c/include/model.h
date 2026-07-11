@@ -26,7 +26,8 @@ Config config_default(void);   /* the paper's configuration */
 typedef struct {
     int    d_num, d_text, d_model;
     Linear fc_gate, proj_num, proj_text;
-    Mat    cat, gate, xn, xt;   /* caches ([T, .]) */
+    Mat    cat, gate, xn, xt;         /* caches ([T, .]) */
+    Mat    s_dz, s_dxn, s_dxt;        /* backward scratch [T,d_model] */
 } PGF;
 PGF  pgf_new(const Config *c, ParamList *pl);
 void pgf_forward(PGF *p, const Mat xnum, const Mat xtext, Mat xtilde);  /* gate in p->gate */
@@ -38,6 +39,7 @@ typedef struct {
     int   in_steps, out_steps;
     Mat   A, dA; float *c, *dc;
     Mat   xcache;
+    Mat   s_tmp;              /* backward scratch [out_steps,in_steps] */
 } TimeMix;
 TimeMix timemix_new(int in_steps, int out_steps, ParamList *pl);
 void    timemix_forward(TimeMix *t, const Mat x, Mat y);
@@ -62,7 +64,9 @@ void    encoder_free(Encoder *e);
 typedef struct {
     Linear fc1, fc2;
     int    hidden, out;
-    Mat    z, h1;       /* caches (single-step) */
+    Mat    z, h1;                       /* caches (single-step) */
+    Mat    s_yt, s_a, s_ytn;            /* forward scratch */
+    Mat    s_da, s_dh1, s_dz;           /* backward scratch */
 } Decoder;
 Decoder decoder_new(const Config *c, ParamList *pl);
 void    decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat preds);

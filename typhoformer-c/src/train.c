@@ -62,10 +62,10 @@ static void ckpt_save(const char *path, Config c, const ParamList *pl) {
 }
 static Config ckpt_read_config(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(1); }
+    if (!f) { die("cannot open %s", path); }
     char magic[4]; int h[9];
-    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, CKPT_MAGIC, 4)) { fprintf(stderr, "%s: bad checkpoint\n", path); exit(1); }
-    if (fread(h, sizeof(int), 9, f) != 9) { exit(1); }
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, CKPT_MAGIC, 4)) { die("%s: bad checkpoint", path); }
+    if (fread(h, sizeof(int), 9, f) != 9) die("%s: unexpected end of file", path);
     fclose(f);
     Config c = {h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]};
     return c;
@@ -75,7 +75,7 @@ static void ckpt_read_params(const char *path, ParamList *pl) {
     fseek(f, 4 + 9 * (long)sizeof(int), SEEK_SET);
     for (int p = 0; p < pl->count; ++p)
         if (fread(pl->item[p].v, sizeof(float), pl->item[p].n, f) != (size_t)pl->item[p].n) {
-            fprintf(stderr, "%s: parameter size mismatch\n", path); exit(1);
+            die("%s: parameter size mismatch", path);
         }
     fclose(f);
 }
@@ -169,7 +169,7 @@ static int cmd_eval(int argc, char **argv) {
     printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d\n",
            weights, c.d_model, c.n_layers, c.n_heads, c.d_ff);
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
-    if (bin && ds.d_text != c.d_text) { fprintf(stderr, "d_text mismatch (data %d vs model %d)\n", ds.d_text, c.d_text); exit(1); }
+    if (bin && ds.d_text != c.d_text) { die("d_text mismatch (data %d vs model %d)", ds.d_text, c.d_text); }
 
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);

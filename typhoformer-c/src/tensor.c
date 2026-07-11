@@ -5,8 +5,18 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+_Noreturn void die(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    exit(1);
+}
 
 Mat mat_new(int rows, int cols) {
     assert(rows > 0 && cols > 0);
@@ -42,25 +52,26 @@ void mat_matmul(const Mat A, const Mat B, Mat out) {
     const int m = A.rows, k = A.cols, n = B.cols;
     mat_zero(out);
     for (int i = 0; i < m; ++i) {
-        const float *Arow = &A.data[i * k];
-        float *Crow = &out.data[i * n];
+        const float *restrict Arow = &A.data[i * k];
+        float *restrict Crow = &out.data[i * n];
         for (int p = 0; p < k; ++p) {
             const float a = Arow[p];
-            const float *Brow = &B.data[p * n];
+            const float *restrict Brow = &B.data[p * n];
             for (int j = 0; j < n; ++j) Crow[j] += a * Brow[j];
         }
     }
 }
 
 void mat_matmul_bt(const Mat A, const Mat B, Mat out) {
-    /* out = A @ B^T ; A[m,k], B[n,k], out[m,n] */
+    /* out = A @ B^T ; A[m,k], B[n,k], out[m,n] (contiguous dot products) */
     assert(A.cols == B.cols && out.rows == A.rows && out.cols == B.rows);
     const int m = A.rows, k = A.cols, n = B.rows;
     for (int i = 0; i < m; ++i) {
+        const float *restrict Arow = &A.data[i * k];
         for (int j = 0; j < n; ++j) {
+            const float *restrict Brow = &B.data[j * k];
             float acc = 0.0f;
-            for (int p = 0; p < k; ++p)
-                acc += A.data[i * k + p] * B.data[j * k + p];
+            for (int p = 0; p < k; ++p) acc += Arow[p] * Brow[p];
             out.data[i * n + j] = acc;
         }
     }
@@ -73,11 +84,11 @@ void mat_matmul_atb(const Mat A, const Mat B, Mat out) {
     const int k = A.rows, m = A.cols, n = B.cols;
     mat_zero(out);
     for (int p = 0; p < k; ++p) {
-        const float *Arow = &A.data[p * m];
-        const float *Brow = &B.data[p * n];
+        const float *restrict Arow = &A.data[p * m];
+        const float *restrict Brow = &B.data[p * n];
         for (int i = 0; i < m; ++i) {
             const float a = Arow[i];
-            float *Crow = &out.data[i * n];
+            float *restrict Crow = &out.data[i * n];
             for (int j = 0; j < n; ++j) Crow[j] += a * Brow[j];
         }
     }

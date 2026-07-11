@@ -27,6 +27,7 @@ PGF pgf_new(const Config *c, ParamList *pl) {
     p.proj_num  = linear_new(c->d_num,  c->d_model, pl, "pgf.proj_num");
     p.proj_text = linear_new(c->d_text, c->d_model, pl, "pgf.proj_text");
     p.cat = NULLMAT; p.gate = NULLMAT; p.xn = NULLMAT; p.xt = NULLMAT;
+    p.s_dz = NULLMAT; p.s_dxn = NULLMAT; p.s_dxt = NULLMAT;
     return p;
 }
 static void ensure(Mat *m, int r, int cc) {
@@ -51,7 +52,8 @@ void pgf_forward(PGF *p, const Mat xnum, const Mat xtext, Mat xtilde) {
 }
 void pgf_backward(PGF *p, const Mat dxtilde, const Mat dgate_pen) {
     const int T = dxtilde.rows, D = p->d_model;
-    Mat dz = mat_new(T, D), dxn = mat_new(T, D), dxt = mat_new(T, D);
+    ensure(&p->s_dz, T, D); ensure(&p->s_dxn, T, D); ensure(&p->s_dxt, T, D);
+    Mat dz = p->s_dz, dxn = p->s_dxn, dxt = p->s_dxt;
     for (int i = 0; i < T * D; ++i) {
         float g = p->gate.data[i];
         float dgate = dxtilde.data[i] * (p->xn.data[i] - p->xt.data[i]);
@@ -63,11 +65,11 @@ void pgf_backward(PGF *p, const Mat dxtilde, const Mat dgate_pen) {
     linear_backward(&p->fc_gate, dz, NULLMAT);       /* inputs are data: no dx */
     linear_backward(&p->proj_num, dxn, NULLMAT);
     linear_backward(&p->proj_text, dxt, NULLMAT);
-    mat_free(&dz); mat_free(&dxn); mat_free(&dxt);
 }
 void pgf_free(PGF *p) {
     linear_free(&p->fc_gate); linear_free(&p->proj_num); linear_free(&p->proj_text);
     mat_free(&p->cat); mat_free(&p->gate); mat_free(&p->xn); mat_free(&p->xt);
+    mat_free(&p->s_dz); mat_free(&p->s_dxn); mat_free(&p->s_dxt);
 }
 
 /* =====================================================================
@@ -80,7 +82,7 @@ TimeMix timemix_new(int in_steps, int out_steps, ParamList *pl) {
     t.dc = (float *)calloc(out_steps, sizeof(float));
     float k = 1.0f / (float)in_steps;
     for (int i = 0; i < out_steps * in_steps; ++i) t.A.data[i] = nn_uniform(-k, k);
-    t.xcache = NULLMAT;
+    t.xcache = NULLMAT; t.s_tmp = NULLMAT;
     plist_add(pl, t.A.data, t.dA.data, out_steps * in_steps, "timemix.A");
     plist_add(pl, t.c, t.dc, out_steps, "timemix.c");
     return t;
@@ -93,7 +95,8 @@ void timemix_forward(TimeMix *t, const Mat x, Mat y) {
 }
 void timemix_backward(TimeMix *t, const Mat dy, Mat dx) {
     const int D = dy.cols;
-    Mat tmp = mat_new(t->out_steps, t->in_steps);
+    ensure(&t->s_tmp, t->out_steps, t->in_steps);
+    Mat tmp = t->s_tmp;
     mat_matmul_bt(dy, t->xcache, tmp);               /* dA = dy @ x^T */
     for (int i = 0; i < t->out_steps * t->in_steps; ++i) t->dA.data[i] += tmp.data[i];
     for (int o = 0; o < t->out_steps; ++o) {
@@ -101,9 +104,11 @@ void timemix_backward(TimeMix *t, const Mat dy, Mat dx) {
         t->dc[o] += s;
     }
     if (dx.data) mat_matmul_atb(t->A, dy, dx);        /* dx = A^T @ dy */
-    mat_free(&tmp);
 }
-void timemix_free(TimeMix *t) { mat_free(&t->A); mat_free(&t->dA); free(t->c); free(t->dc); mat_free(&t->xcache); }
+void timemix_free(TimeMix *t) {
+    mat_free(&t->A); mat_free(&t->dA); free(t->c); free(t->dc);
+    mat_free(&t->xcache); mat_free(&t->s_tmp);
+}
 
 /* =====================================================================
  * Encoder
@@ -158,12 +163,15 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
     d.fc1 = linear_new(c->d_model + c->out_dim, c->d_model, pl, "dec.fc1");
     d.fc2 = linear_new(c->d_model, c->out_dim, pl, "dec.fc2");
     d.z = NULLMAT; d.h1 = NULLMAT;
+    d.s_yt = NULLMAT; d.s_a = NULLMAT; d.s_ytn = NULLMAT;
+    d.s_da = NULLMAT; d.s_dh1 = NULLMAT; d.s_dz = NULLMAT;
     return d;
 }
 void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
     ensure(&d->z, 1, H + O); ensure(&d->h1, 1, H);
-    Mat yt = mat_new(1, O), a = mat_new(1, H), ytn = mat_new(1, O);
+    ensure(&d->s_yt, 1, O); ensure(&d->s_a, 1, H); ensure(&d->s_ytn, 1, O);
+    Mat yt = d->s_yt, a = d->s_a, ytn = d->s_ytn;
     mat_copy(yt, yprev);
     for (int s = 0; s < steps; ++s) {
         memcpy(&d->z.data[0], henc.data, H * sizeof(float));
@@ -174,19 +182,22 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, int steps, Mat
         mat_copy(yt, ytn);
         memcpy(&preds.data[s * O], yt.data, O * sizeof(float));
     }
-    mat_free(&yt); mat_free(&a); mat_free(&ytn);
 }
 void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     const int H = d->hidden, O = d->out;
     assert(dpreds.rows == 1);                         /* single-step training */
-    Mat da = mat_new(1, H), dh1 = mat_new(1, H), dz = mat_new(1, H + O);
+    ensure(&d->s_da, 1, H); ensure(&d->s_dh1, 1, H); ensure(&d->s_dz, 1, H + O);
+    Mat da = d->s_da, dh1 = d->s_dh1, dz = d->s_dz;
     linear_backward(&d->fc2, dpreds, da);
     for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1.data[i] > 0.0f) ? da.data[i] : 0.0f;
     linear_backward(&d->fc1, dh1, dz);
     memcpy(dhenc.data, &dz.data[0], H * sizeof(float));   /* grad wrt henc */
-    mat_free(&da); mat_free(&dh1); mat_free(&dz);
 }
-void decoder_free(Decoder *d) { linear_free(&d->fc1); linear_free(&d->fc2); mat_free(&d->z); mat_free(&d->h1); }
+void decoder_free(Decoder *d) {
+    linear_free(&d->fc1); linear_free(&d->fc2); mat_free(&d->z); mat_free(&d->h1);
+    mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn);
+    mat_free(&d->s_da); mat_free(&d->s_dh1); mat_free(&d->s_dz);
+}
 
 /* =====================================================================
  * Full model

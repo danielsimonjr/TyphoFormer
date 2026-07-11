@@ -1,7 +1,19 @@
 # TyphoFormer-C — pure C, standard library only.
 CC      ?= gcc
-CFLAGS  := -std=c11 -O3 -Wall -Wextra -Wpedantic -Iinclude
+OPT     ?= -O3
+CFLAGS  := -std=c11 $(OPT) -Wall -Wextra -Wpedantic -Iinclude
 LDLIBS  := -lm
+
+# Opt-in native SIMD (non-portable binary; source stays pure C):  make NATIVE=1
+ifeq ($(NATIVE),1)
+CFLAGS  += -march=native -funroll-loops
+endif
+
+# Sanitizer build for tests:  make SAN=1 test
+ifeq ($(SAN),1)
+CFLAGS  += -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+LDLIBS  += -fsanitize=address,undefined
+endif
 
 SRC     := $(wildcard src/*.c)
 OBJ     := $(SRC:.c=.o)
@@ -9,7 +21,7 @@ OBJ     := $(SRC:.c=.o)
 TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
-.PHONY: all test clean
+.PHONY: all test test-san clean
 
 all: typhoformer
 
@@ -23,6 +35,11 @@ tests/%: tests/%.c $(BUILD)
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== running $$t =="; ./$$t || exit 1; done
+
+# Rebuild with AddressSanitizer + UBSan and run the tests.
+test-san:
+	$(MAKE) clean
+	$(MAKE) SAN=1 test
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
