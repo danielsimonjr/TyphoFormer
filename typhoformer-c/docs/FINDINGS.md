@@ -6,23 +6,30 @@ more than "is it well-built." These are the honest results on the bundled
 5-year HURDAT2 sample (~98 storms). All numbers are **held-out test** ΔR
 (great-circle km), scored on storms never used for training or model selection.
 
+> **Re-measured.** Every §1–§9 number below was re-run under one uniform
+> protocol — compact config, 30 epochs, early stopping (`--patience=8`),
+> `--threads=1` — after the matmul vectorization changed float summation order
+> (see §11's sensitivity control). **Every qualitative conclusion survived**;
+> individual numbers moved by a few km, exactly the float-level sensitivity §11
+> quantifies. §10 is kept unchanged as the historical pre-vectorization record.
+
 ## 1. The single-split headline is not trustworthy
 
 The test ΔR swings wildly with *which storms* land in the test set. Compact
-config, 25 epochs, early stopping, varying only `--split_seed`:
+config, varying only `--split_seed`:
 
 | split_seed | model ΔR (km) | persistence ΔR (km) | model wins? |
 |:--:|:--:|:--:|:--:|
-| 1 | 132.6 | 124.8 | no |
-| 2 | 111.9 | 122.2 | **yes** |
-| 3 | 95.1 | 134.1 | **yes** |
-| 4 | 96.3 | 120.4 | **yes** |
-| 5 | 206.4 | 115.8 | no |
-| **mean ± std** | **128.5 ± 41.3** | **123.5** | **3 / 5** |
+| 1 | 130.0 | 124.8 | no |
+| 2 | 111.2 | 122.2 | **yes** |
+| 3 | 110.5 | 134.1 | **yes** |
+| 4 | 104.0 | 120.4 | **yes** |
+| 5 | 199.9 | 115.8 | no |
+| **mean ± std** | **131.1 ± 39.6** | **123.5** | **3 / 5** |
 
-The model is, on average, at **rough parity with persistence** (128 vs 123 km) —
-but the **±41 km spread dwarfs the ~5 km gap**. Quoting any single split (the old
-"79 km", or the 172 km from split 42) is misleading. The honest statement is:
+The model is, on average, at **rough parity with persistence** (131 vs 123 km) —
+but the **±40 km spread dwarfs the ~8 km gap**. Quoting any single split (the old
+"79 km", or the 186 km from split 42) is misleading. The honest statement is:
 *on this data the model is about as good as persistence, and the split noise is
 larger than the effect.*
 
@@ -34,10 +41,10 @@ zeroed) tests it directly. On `--split_seed=42`:
 
 | model | held-out test ΔR (km) |
 |:--|:--:|
-| with text (full model) | 172.9 |
-| **numbers only (`--no_text`)** | **156.0** |
+| with text (full model) | 185.7 |
+| **numbers only (`--no_text`)** | **171.3** |
 
-The **numbers-only model is better by ~17 km**. On this data and configuration,
+The **numbers-only model is better by ~14 km**. On this data and configuration,
 the language branch is not helping — it adds parameters and, if anything, noise.
 (One split is not the last word; combined with the huge split variance above, the
 honest reading is that the text branch provides no *robust* benefit here — a
@@ -51,20 +58,20 @@ Scaling from the compact demo (198 K params) to the **full paper config**
 
 | model | params | held-out test ΔR (km) | persistence |
 |:--|:--:|:--:|:--:|
-| compact, numbers-only | 198 K | 156.0 | 102.7 |
-| compact, with text | 198 K | 172.9 | 102.7 |
-| **full config, with text** | **5.1 M** | **158.0** | **102.7** |
+| compact, numbers-only | 198 K | 171.3 | 102.7 |
+| compact, with text | 198 K | 185.7 | 102.7 |
+| **full config, with text** | **5.1 M** | **163.1** | **102.7** |
 
-The full model lands between the compact variants and is still **~55 km worse
-than persistence** on this split. Adding 26× the parameters did not close the
+The full model edges out the compact variants on this split but is still
+**~60 km worse than persistence**. Adding 26× the parameters did not close the
 gap — the bottleneck is the **~98-storm dataset**, not model size. (Consistent
-with §1: 158 km sits inside the 95–206 km split-variance band.)
+with §1: 163 km sits inside the 104–200 km split-variance band.)
 
 ## 4. The diagnosis: the model was blind to motion
 
 The honest bar is not persistence (~123 km) — it is **constant-velocity
 extrapolation** (add the last observed velocity), which this repo's own
-`baseline` subcommand puts at **39 km @ 6h**. The default model (§1–3, ~128 km)
+`baseline` subcommand puts at **39 km @ 6h**. The default model (§1–3, ~131 km)
 is *3–4× worse than that two-line physics baseline*.
 
 Why? Its inputs (`NUMCOL` in `src/data.c`) are **intensity only** — max wind, min
@@ -83,17 +90,18 @@ config, 30 epochs, early stopping):
 
 | model | held-out test ΔR (km) | vs persistence | vs const-velocity |
 |:--|:--:|:--:|:--:|
-| default (intensity + text) | 128.5 ± 41.3 | ~parity | 3–4× worse |
-| **+ `--motion`** (position + velocity inputs) | 79.0 ± 26.8 | beats it | ~2× worse |
-| **+ `--motion --delta`** (predict displacement) | **48.1 ± 2.7** | **2.5× better** | competitive (39) |
+| default (intensity + text) | 131.1 ± 39.6 | ~parity | 3–4× worse |
+| **+ `--motion`** (position + velocity inputs) | 76.2 ± 30.6 | beats it | ~2× worse |
+| **+ `--motion --delta`** (predict displacement) | **48.4 ± 2.6** | **2.5× better** | competitive (39) |
 
 - **`--motion`** (add `lat, lon, Δlat, Δlon` to the inputs) is the dominant fix:
-  it hands the model the signal constant-velocity already uses. Mean ΔR 128 → 79.
+  it hands the model the signal constant-velocity already uses. Mean ΔR 131 → 76.
 - **`--delta`** (the **displacement head**: the decoder predicts the change from
-  the seed, `fc2` zero-initialised so it *starts* at persistence) halves the error again
-  and — just as important — **collapses the variance** (std 27 → 3 km): every
-  split now lands in 44–53 km. Starting from a sensible prior and learning the
-  correction is far more stable than regressing absolute coordinates.
+  the seed, `fc2` zero-initialised so it *starts* at persistence) cuts the error
+  by a third again and — just as important — **collapses the variance**
+  (std 31 → 3 km): every split now lands in 45–51 km. Starting from a sensible
+  prior and learning the correction is far more stable than regressing absolute
+  coordinates.
 
 The fixed model (**48 km**) is **2.5× better than persistence** and finally
 **competitive with the constant-velocity baseline (~39 km)** — from a starting
@@ -105,10 +113,10 @@ Repeating the `--no_text` ablation on the *fixed* model, across all 5 splits:
 
 | fixed model | held-out test ΔR (km) |
 |:--|:--:|
-| `--motion --delta` **with** text | 48.1 ± 2.7 |
-| `--motion --delta` **without** text (`--no_text`) | **46.5 ± 3.9** |
+| `--motion --delta` **with** text | 48.4 ± 2.6 |
+| `--motion --delta` **without** text (`--no_text`) | **46.7 ± 4.8** |
 
-Numbers-only is again **marginally better** (~1.6 km). This is now a robust
+Numbers-only is again **marginally better** (~1.7 km). This is now a robust
 result — five splits, and a model that actually forecasts well — and it still
 says the GPT-4o/MiniLM language branch, the paper's central premise, provides no
 benefit on this data. If anything it adds a little noise.
@@ -120,15 +128,15 @@ option at a time, each across three storm-split seeds (held-out test ΔR, km):
 
 | encoder variant | seed 1 | seed 3 | seed 5 | mean |
 |:--|:--:|:--:|:--:|:--:|
-| base (`--motion --delta`) | 47.2 | 51.9 | 50.6 | 49.9 |
-| `--no_spatial` (drop dead N=1 blocks) | 54.4 | 49.8 | 48.4 | 50.9 |
-| `--posenc` (learned positional encoding) | 47.9 | 51.2 | 49.2 | 49.5 |
-| `--pool=last` (recency pooling) | 51.3 | 56.3 | 47.7 | 51.8 |
-| `--prenorm` (pre-norm blocks) | 52.6 | 52.9 | 48.5 | 51.3 |
-| all four together | 47.1 | 47.0 | 49.2 | **47.7** |
+| base (`--motion --delta`) | 48.0 | 51.4 | 50.4 | 49.9 |
+| `--no_spatial` (drop dead N=1 blocks) | 48.0 | 53.1 | 45.5 | 48.9 |
+| `--posenc` (learned positional encoding) | 49.1 | 50.8 | 51.2 | 50.4 |
+| `--pool=last` (recency pooling) | 48.3 | 52.5 | 49.0 | 49.9 |
+| `--prenorm` (pre-norm blocks) | 54.4 | 50.9 | 47.2 | 50.8 |
+| all four together | 47.1 | 47.4 | 45.5 | **46.7** |
 
 Every single-option mean sits inside the ±3 km split-to-split noise of the base
-— none is a real improvement. Stacking all four is marginally the best (47.7 vs
+— none is a real improvement. Stacking all four is marginally the best (46.7 vs
 49.9), but still within noise, and it costs a learned positional table. The
 honest read: **the encoder architecture is not what limits this model.** Once
 motion is in the inputs and the head predicts displacement, the remaining error
@@ -154,11 +162,14 @@ encoded context instead attends over the relative states — (Δlat, Δlon,
 
 | variant | seed 1 | seed 3 | seed 5 | mean |
 |:--|:--:|:--:|:--:|:--:|
-| base (`--motion --delta`) | 47.2 | 51.9 | 50.6 | 49.9 |
-| `--timebias` | 46.2 | 52.5 | 51.6 | 50.1 |
-| `--co_spatial` (random-init residual) | **93.6** | 54.2 | 48.9 | 65.6 ⚠ |
-| `--co_spatial` (zero-init residual) | 50.0 | 49.7 | 53.5 | 51.1 |
-| `--timebias --co_spatial` (zero-init) | 51.2 | 52.5 | 48.9 | 50.9 |
+| base (`--motion --delta`) | 48.0 | 51.4 | 50.4 | 49.9 |
+| `--timebias` | 48.7 | 52.4 | 55.3 | 52.1 |
+| `--co_spatial` (random-init residual, historical) | **93.6** | 54.2 | 48.9 | 65.6 ⚠ |
+| `--co_spatial` (zero-init residual) | 60.5 | 50.8 | 50.2 | 53.8 |
+| `--timebias --co_spatial` (zero-init) | 53.3 | 48.1 | 50.5 | 50.6 |
+
+(The random-init row is the historical measurement that motivated the fix — that
+build no longer exists to re-measure.)
 
 Two things worth recording honestly:
 
@@ -167,13 +178,15 @@ Two things worth recording honestly:
    1 that kicked training off course and ΔR blew up to 93.6 km — nearly 2× the
    base, and close to persistence. Zero-initialising the attention's output
    projection (so the module starts as an exact no-op and learns the correction
-   from zero — the delta-head trick) removed the divergence: the seed-1 result
-   dropped from 93.6 → 50.0 and the spread collapsed back into the noise band.
-2. **Once stable, it does not help.** Zero-init `--co_spatial` means 51.1, and
-   `--timebias` 50.1 — both inside the ±3 km split noise of the 49.9 base, i.e.
-   neither is a real improvement. Giving the temporal attention a sense of time,
-   and making the spatial attention genuinely multi-node, are both *architecturally*
-   the right thing to do — but on this data they change nothing measurable.
+   from zero — the delta-head trick) removed the divergence and collapsed the
+   spread back toward the noise band (seed 1: 93.6 → 50.0 at the time of the
+   fix; 60.5 under the re-measured kernel — elevated, but no blow-up).
+2. **Once stable, it does not help.** Zero-init `--co_spatial` means 53.8, and
+   `--timebias` 52.1 — at or a few km *above* the 49.9 base, i.e. neither is an
+   improvement (if anything they cost a little here). Giving the temporal
+   attention a sense of time, and making the spatial attention genuinely
+   multi-node, are both *architecturally* the right thing to do — but on this
+   data they measurably do not help.
 
 This is the same lesson as §7 from a different angle: the ceiling here is the
 data and the horizon, not how cleverly 12 steps of context (or a handful of
@@ -205,14 +218,14 @@ Held-out test ΔR (km), fixed `--motion` model, three storm-split seeds:
 
 | decoder | seed 1 | seed 3 | seed 5 | mean |
 |:--|:--:|:--:|:--:|:--:|
-| `--delta` (anchor at persistence) | 47.2 | 51.9 | 50.6 | 49.9 |
-| `--cv` (anchor at constant-velocity) | 42.2 | 41.3 | **37.9** | **40.5** |
+| `--delta` (anchor at persistence) | 48.0 | 51.4 | 50.4 | 49.9 |
+| `--cv` (anchor at constant-velocity) | 43.4 | 41.1 | **37.8** | **40.8** |
 | *constant-velocity / CLIPER baseline* | — | — | — | *39.4* |
 
 This is the first **architectural** change in the whole exercise that moves the
-needle: **49.9 → 40.5 km (~19%), consistently on every split** (each `--cv` split
+needle: **49.9 → 40.8 km (~18%), consistently on every split** (each `--cv` split
 beats its `--delta` counterpart), landing essentially *on* CLIPER — and on seed 5
-a hair *under* it (37.9 vs 39.4). The learned model has finally caught the
+a hair *under* it (37.8 vs 39.4). The learned model has finally caught the
 constant-velocity forecaster it was losing to.
 
 It has not decisively *passed* CLIPER, and at a single horizon (6h) it arguably
@@ -356,7 +369,7 @@ adds variance on this much data.
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
-  motion — and fixing it moved held-out ΔR from ~128 km to **48 km**, turning a
+  motion — and fixing it moved held-out ΔR from ~131 km to **48 km**, turning a
   sub-persistence model into one that beats persistence 2.5× and rivals
   constant-velocity.
 - The **language branch does not earn its keep** here, before or after the fix.
@@ -365,7 +378,7 @@ adds variance on this much data.
   the honest open question.
 - **The gap to constant-velocity is now closed** (§9) **and, at long horizons,
   passed** (§11). `--cv` anchors the decoder at constant-velocity instead of
-  persistence and learns only the curvature: 49.9 → **40.5 km** at 6h, matching
+  persistence and learns only the curvature: 49.9 → **40.8 km** at 6h, matching
   the 39.4 km CLIPER baseline — and at 48h it **beats split-matched CLIPER on 4
   of 5 splits (−9.3%)**, exactly where a learned curvature term should win. The
   right *parametrization* — like motion in the inputs — is a real lever; a
