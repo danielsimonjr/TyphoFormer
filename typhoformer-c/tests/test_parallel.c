@@ -101,8 +101,11 @@ static int check_equivalence(const Config *c, const Dataset *ds, const int *idx,
 /* Reset every architecture toggle to the defaults. */
 static void reset_variants(void) {
     model_set_delta(0); model_set_cv(0); model_set_gru(0); model_set_xattn(0);
-    model_set_co_spatial(0);
+    model_set_co_spatial(0); model_set_rotframe(0);
 }
+
+/* cv + motion-aligned frame, as one toggle for the variant table. */
+static void set_cv_rotframe(int on) { model_set_cv(on); model_set_rotframe(on); }
 
 int main(void) {
     nn_seed(7);
@@ -182,6 +185,7 @@ int main(void) {
 
     struct { const char *label; void (*set)(int); } variants[] = {
         { "cv",         model_set_cv },
+        { "cv+rotfrm",  set_cv_rotframe },
         { "gru",        model_set_gru },
         { "xattn",      model_set_xattn },
         { "co_spatial", model_set_co_spatial },

@@ -22,6 +22,20 @@ int  model_delta(void) { return g_delta; }
 static int g_cv = 0;
 void model_set_cv(int on) { g_cv = on; }
 
+/* Motion-aligned frame for the cv correction (parameter-free; changes NO
+ * parameter layout, so checkpoints are interchangeable — but eval must use the
+ * same flag or the correction is interpreted in the wrong frame). The MLP's
+ * output is read as (along-track, cross-track) components and rotated into
+ * lat/lon by the current velocity direction u = v/|v|:
+ *     c_glob = R(u)·c_local,   R = [[u0, −u1], [u1, u0]]
+ * so the learned curvature is rotation-invariant — "turn left by x" means the
+ * same thing whatever the storm's heading, which is how recurvature actually
+ * works. When |v| ≈ 0 the frame is undefined; we fall back to the identity
+ * rotation (and treat the frame as constant in the backward). Off by default. */
+static int g_rotframe = 0;
+void model_set_rotframe(int on) { g_rotframe = on; }
+#define ROTF_EPS 1e-6f
+
 /* Recurrent (GRU) decoder correction. Its rollout branch anchors at
  * constant-velocity itself (zero-init fc_out), so it needs no separate g_cv.
  * Off by default. */
@@ -281,6 +295,9 @@ void encoder_free(Encoder *e) {
 Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
     d.use_cv = g_cv; d.use_gru = g_gru; d.use_xattn = g_xattn;
+    /* rotframe applies to the plain cv head only (out_dim 2 by construction). */
+    d.use_rotframe = (g_rotframe && g_cv && !g_gru && !g_xattn && c->out_dim == 2);
+    d.frc = d.use_rotframe ? (Mat *)calloc(c->pred_len, sizeof(Mat)) : NULL;
     if (g_xattn) {
         /* per-step context = cross-attention([p;v] query over encoder sequence);
          * fed to the cv MLP in place of the static pooled context. */
@@ -410,6 +427,24 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
             mat_copy(a, d->h1c[s]); mat_relu(a);
             mat_copy(d->ac[s], a);
             linear_forward(&d->fc2, a, c);                                /* correction */
+            if (d->use_rotframe) {
+                /* Read c as (along-track, cross-track) and rotate into lat/lon
+                 * by the CURRENT velocity direction u = v/|v| (pre-update v_s):
+                 *   c_glob = R(u)·c_local,  R = [[u0,−u1],[u1,u0]].
+                 * |v|≈0 → identity frame (marked by sp=0 in the cache, so the
+                 * backward treats the frame as constant there). Cache what the
+                 * backward needs: u, |v|, and the local correction. */
+                ensure(&d->frc[s], 1, 5);
+                float v0 = v.data[0], v1 = v.data[1];
+                float sp = sqrtf(v0 * v0 + v1 * v1);
+                float u0 = 1.0f, u1 = 0.0f;
+                if (sp > ROTF_EPS) { u0 = v0 / sp; u1 = v1 / sp; } else sp = 0.0f;
+                float c0 = c.data[0], c1 = c.data[1];
+                d->frc[s].data[0] = u0; d->frc[s].data[1] = u1; d->frc[s].data[2] = sp;
+                d->frc[s].data[3] = c0; d->frc[s].data[4] = c1;
+                c.data[0] = c0 * u0 - c1 * u1;                            /* R·c_local */
+                c.data[1] = c0 * u1 + c1 * u0;
+            }
             for (int i = 0; i < O; ++i) {
                 float y = p.data[i] + v.data[i] + c.data[i];
                 v.data[i] += c.data[i];
@@ -525,8 +560,34 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
         Mat dc = d->s_dyt, dpnext = d->s_dynext, dvnext = d->s_dvnext;
         mat_zero(d->s_dhacc); mat_zero(dpnext); mat_zero(dvnext);
         for (int s = steps - 1; s >= 0; --s) {
+            /* dc is the grad on the GLOBAL correction c_glob (it feeds pred_s,
+             * p_{s+1}, v_{s+1}). */
             for (int i = 0; i < O; ++i)
                 dc.data[i] = dpreds.data[s * O + i] + dpnext.data[i] + dvnext.data[i];
+            float dvf0 = 0.0f, dvf1 = 0.0f;          /* frame's extra grad into v_s */
+            if (d->use_rotframe) {
+                /* Reverse c_glob = R(u(v))·c_local. Two paths:
+                 *   (1) into the MLP:   dc_local = Rᵀ·dc_glob
+                 *   (2) into v via u:   dv += (∂c_glob/∂v)ᵀ·dc_glob
+                 * With J = ∂u/∂v = (I − u·uᵀ)/|v| (symmetric) and the 90°
+                 * rotation P = [[0,−1],[1,0]] (Pᵀ = −P):
+                 *   ∂c_glob/∂v = c0·J + c1·P·J
+                 *   dv_frame   = J·w,  w = c0·dc_glob − c1·P·dc_glob.
+                 * Identity frame (|v|≈0, sp stored as 0): both reduce to
+                 * dc_local = dc_glob, dv_frame = 0. */
+                const float *fr = d->frc[s].data;
+                float u0 = fr[0], u1 = fr[1], sp = fr[2], c0 = fr[3], c1 = fr[4];
+                float g0 = dc.data[0], g1 = dc.data[1];
+                if (sp > 0.0f) {
+                    float w0 = c0 * g0 + c1 * g1;    /* w = c0·g − c1·P·g ; P·g = (−g1, g0) */
+                    float w1 = c0 * g1 - c1 * g0;
+                    float udw = u0 * w0 + u1 * w1;   /* J·w = (w − u(u·w))/|v| */
+                    dvf0 = (w0 - u0 * udw) / sp;
+                    dvf1 = (w1 - u1 * udw) / sp;
+                }
+                dc.data[0] =  u0 * g0 + u1 * g1;     /* Rᵀ·dc_glob → grad on c_local */
+                dc.data[1] = -u1 * g0 + u0 * g1;
+            }
             mat_copy(d->fc2.xcache, d->ac[s]);
             linear_backward(&d->fc2, dc, da);
             for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[s].data[i] > 0.0f) ? da.data[i] : 0.0f;
@@ -537,8 +598,9 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
                 float gs = dpreds.data[s * O + i];
                 float dp_old = dpnext.data[i], dv_old = dvnext.data[i];
                 float dp_net = dz.data[H + i], dv_net = dz.data[H + O + i];
+                float dv_frame = (i == 0) ? dvf0 : dvf1;                 /* rotframe's u(v_s) path */
                 dpnext.data[i] = gs + dp_old + dp_net;                   /* dp_s */
-                dvnext.data[i] = gs + dp_old + dv_old + dv_net;          /* dv_s */
+                dvnext.data[i] = gs + dp_old + dv_old + dv_net + dv_frame;  /* dv_s */
             }
         }
         memcpy(dhenc.data, d->s_dhacc.data, H * sizeof(float));
@@ -568,6 +630,7 @@ void decoder_free(Decoder *d) {
     else                   { linear_free(&d->fc1); linear_free(&d->fc2); }
     if (d->use_xattn)      { xattn_free(&d->xattn); mat_free(&d->s_xq); mat_free(&d->s_dmem); }
     for (int s = 0; s < d->max_steps; ++s) { mat_free(&d->zc[s]); mat_free(&d->h1c[s]); mat_free(&d->ac[s]); }
+    if (d->frc) { for (int s = 0; s < d->max_steps; ++s) mat_free(&d->frc[s]); free(d->frc); }
     free(d->zc); free(d->h1c); free(d->ac);
     mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn); mat_free(&d->s_v);
     mat_free(&d->s_da); mat_free(&d->s_dh1); mat_free(&d->s_dz);

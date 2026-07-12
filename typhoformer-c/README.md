@@ -100,6 +100,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--physics` | **Second-order physics features**: acceleration (Δ²lat, Δ²lon), translation speed, heading unit vector, and seasonal day-of-year phase (sin/cos). Composes with `--motion` (+7 features). | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
 | `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Supersedes `--delta`. | off |
+| `--rotframe` | cv correction predicted in the **motion-aligned frame** (along/cross-track, rotated by the velocity direction; implies `--cv`; parameter-free but eval must match). Tested; did **not** help (worse at 6h — FINDINGS §13). | off |
 | `--gru` | Constant-velocity decoder whose curvature correction is produced by a **GRU** with hidden state carried across the rollout (initialised from the encoder context) — gives the multi-step rollout real memory. | off |
 | `--xattn` | Constant-velocity decoder whose per-step context comes from **cross-attention over the encoder's full sequence** (not the pooled vector). | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
@@ -114,7 +115,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
 | `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |
-| `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
+| `--csv= --emb= --bin= --save=` | Data source / checkpoint path. `--emb=none` = **text-free mode**: the language branch is fed zeros (== `--no_text`), so CSVs converted from raw HURDAT2 train without any embeddings. | repo defaults |
 
 **For accuracy, train with `--motion --physics --cv`**: motion features give the
 model the trajectory signal, the physics features add the curvature signal
@@ -167,6 +168,7 @@ core consumes their output, precomputed embeddings):
 | `tools/gen_descriptions.py` | GPT-4o natural-language descriptions per record (needs `OPENAI_API_KEY`). |
 | `tools/gen_embeddings.py`   | MiniLM (`all-MiniLM-L6-v2`) 384-d embeddings → `emb_chunk_*.npy`. |
 | `tools/npy_dict_to_bin.py`  | Convert the pre-split pickled `data/{train,val,test}/*.npy` dicts → `.tfb`. |
+| `tools/hurdat2_to_csv.py`   | Convert a **raw NOAA HURDAT2** database file → this repo's CSV schema, for scaling past the bundled 98 storms. Train the result text-free: `--csv=... --emb=none` (the language branch measurably doesn't help — FINDINGS §2/§6 — so no GPT-4o/MiniLM regeneration is needed). |
 
 End-to-end pipeline (from raw records):
 

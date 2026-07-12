@@ -469,10 +469,33 @@ gain is smaller than typical deep-ensemble lore because cv members are highly
 correlated: they share the constant-velocity anchor and learn similar small
 corrections. Cheap insurance, not a lever.
 
-**Takeaway.** All three behave exactly as the small-data hypothesis predicts:
-physically-motivated inputs give a small consistent win, robustness mechanisms
-collapse variance, averaging buys insurance — and nothing moves the number a
-lot, because the ceiling is still 98 storms.
+**`--physics` also helps at 48h.** Repeating the comparison at `--pred_len=8`
+(6–48h mean): no-physics cv 294.7 ± 36 → with physics **285.0 ± 26**, better on
+4 of 5 splits. The curvature signal pays where curvature matters most.
+
+**`--rotframe` (motion-aligned correction frame) — tested, did not help.** The
+cv correction predicted in (along-track, cross-track) coordinates and rotated
+into lat/lon by the velocity direction — rotation-invariant curvature, exact
+backward through `∂u/∂v`, gradient-checked. On `--motion --physics --cv`:
+
+| horizon | baseline | `--rotframe` | verdict |
+|:--|:--:|:--:|:--|
+| 6h mean (5 seeds) | 39.10 | 40.43 | **worse on 4/5 splits** (+1.3 km) |
+| 6–48h mean (5 seeds) | 285.0 ± 26 | 279.9 ± 15 | neutral (2/5 wins, −5 km inside noise) |
+
+The physically-elegant idea loses at 6h, plausibly because the frame itself is
+noisy exactly when it matters least: a quasi-stationary storm has an
+ill-defined heading, and the rotation injects that jitter into the correction.
+Another entry for the §7/§8 pattern — architectural cleverness beyond the
+anchor does not beat giving the network the raw signal (`--physics` already
+feeds heading explicitly, and the MLP can learn its own frame). The flag stays
+available and off by default.
+
+**Takeaway.** All four behave exactly as the small-data hypothesis predicts:
+physically-motivated inputs give a small consistent win (at both horizons),
+robustness mechanisms collapse variance, averaging buys insurance, and imposing
+structure the network can already learn does not help — nothing moves the
+number a lot, because the ceiling is still 98 storms.
 
 ## 14. What this means
 
