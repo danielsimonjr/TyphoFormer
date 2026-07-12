@@ -51,6 +51,7 @@ static double serial_grads(Model *m, ParamList *pl, const Dataset *ds,
         loss += model_loss(m->pred, Y, m->pgf.gate, lambda, dpred, dgate);
         model_backward(m, dpred, dgate);
     }
+    model_flush_grads(m);            /* no-op unless deferred dW is enabled */
     float inv = 1.0f / (float)bs;
     for (int p = 0; p < pl->count; ++p)
         for (int e = 0; e < pl->item[p].n; ++e) pl->item[p].g[e] *= inv;
@@ -130,6 +131,28 @@ int main(void) {
         for (int e = 0; e < mpl.item[p].n; ++e) gserial[o++] = mpl.item[p].g[e];
 
     int worst_fail = 0;
+
+    /* ---- deferred-dW equivalence: same batch, immediate vs deferred+flush.
+     * The deferred path is one big GEMM per layer instead of per-sample
+     * accumulation — identical math up to float summation order. */
+    {
+        nn_set_defer_grads(1);
+        double dloss = serial_grads(&master, &mpl, &ds, idx, 0, bs, lambda);
+        nn_set_defer_grads(0);
+        float max_abs = 0.0f;
+        o = 0;
+        for (int p = 0; p < mpl.count; ++p)
+            for (int e = 0; e < mpl.item[p].n; ++e) {
+                float dd = fabsf(mpl.item[p].g[e] - gserial[o++]);
+                if (dd > max_abs) max_abs = dd;
+            }
+        double lerr = fabs(dloss - sloss);
+        int fail = !(max_abs <= 1e-4f) || !(lerr <= 1e-4) || isnan(dloss);
+        printf("deferred-dW | loss |d|=%.2e | grad max abs=%.2e  %s\n",
+               lerr, max_abs, fail ? "FAIL" : "ok");
+        if (fail) worst_fail = 1;
+    }
+
     for (int nw = 2; nw <= 4; ++nw) {
         ParTrainer *pt = partrainer_new(&c, nw);
         partrainer_broadcast(pt, &mpl);   /* replicas get the master weights */
@@ -190,12 +213,14 @@ int main(void) {
         { "xattn",      model_set_xattn },
         { "co_spatial", model_set_co_spatial },
     };
+    nn_set_defer_grads(1);   /* run the variant phase as the real trainer does: deferred dW */
     for (unsigned v = 0; v < sizeof variants / sizeof variants[0]; ++v) {
         reset_variants();
         nn_seed(11 + v);                             /* fresh, deterministic weights */
         variants[v].set(1);
         if (check_equivalence(&vc, &rds, ridx, 12, variants[v].label)) worst_fail = 1;
     }
+    nn_set_defer_grads(0);
     reset_variants();
     dataset_free(&rds);
 

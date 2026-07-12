@@ -106,6 +106,9 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
 | `--huber=` | **Huber loss** with transition point δ on the normalized residual (quadratic core = MSE, linear tails) — tempers fast-moving outlier storms. 0 = plain MSE. | 0 |
 | `--hweight=` | **Horizon-weighted loss**: forecast step h weighted `(h+1)^γ` (mean-normalized) — γ>0 upweights the long horizons that dominate the km error. 0 = uniform. | 0 |
+| `--tf=` | **Teacher forcing** on the cv rollout: each training step's output state is replaced by ground truth with a probability annealed 1→0 over E epochs (recurrence gradient cut at forced steps; eval always autoregressive). | 0 |
+| `--no_lon` | **Ablation**: zero `--motion`'s absolute-longitude column (keeps d_num/checkpoint layout; pass to `eval` too). Tests climatology-signal vs memorization. | off |
+| `--defer_dw` | Deferred per-batch dW GEMMs instead of per-sample accumulation. Bit-identical math; measured **neutral** on the reference 4-core box (backward is compute-bound at these sizes) — kept for hardware where gradients exceed the last-level cache. | off |
 | `--spatial` | Restore the paper's N=1 spatial encoder blocks. They are **off by default** (their Q/K never train and dropping them is accuracy-neutral — FINDINGS §7 — for ~2× less encoder compute); required to load checkpoints trained before the default changed. `--no_spatial` is accepted as a no-op. | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
 | `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |

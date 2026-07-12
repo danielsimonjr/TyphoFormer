@@ -142,6 +142,8 @@ typedef struct {
     int    use_rotframe;                /* cv correction in the motion-aligned frame */
     Mat   *zc, *h1c, *ac;               /* per-step caches (autoregressive rollout) */
     Mat   *frc;                         /* per-step frame cache [1,5]: u0,u1,|v|,c_local0,c_local1 (rotframe) */
+    const float *tf_y;                  /* teacher targets [pred_len*2] or NULL (set by model_forward; cv only) */
+    int   *forced;                      /* per-step: was this step's output state replaced by truth? */
     Mat    s_yt, s_a, s_ytn, s_v;       /* forward scratch (s_v: cv velocity) */
     Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dvnext, s_dhacc;  /* backward scratch */
     Mat    s_hid0, s_dhid, s_dhc, s_dx2;  /* gru scratch (initial hidden, hidden grads, dx) */
@@ -228,13 +230,22 @@ typedef struct {
     int       use_co;
     Mat       nbr;  int nbr_cnt;       /* current sample's neighbours    */
     Mat       vseed;                   /* current sample's seed velocity (cv mode) */
+    Mat       tf_Y; int tf_set;        /* current sample's teacher targets (cv teacher forcing) */
     Mat       xtilde, henc, henc2, dhenc, dhenc2, dxtilde, pred;
 } Model;
 Model model_new(const Config *c, ParamList *pl);
 void  model_set_neighbors(Model *m, const Mat nbr, int cnt);   /* set before model_forward */
 void  model_set_seed_velocity(Model *m, const Mat v);          /* set before model_forward (cv) */
+void  model_set_teacher(Model *m, const Mat Y);                /* set before model_forward (cv teacher forcing) */
+/* Probability that a training rollout step's output state is replaced by the
+ * teacher target (cv head only; inert at eval). The trainer anneals this to 0
+ * over --tf=E epochs. 0 = off (default). */
+void  model_set_tf_prob(float p);
 void  model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev); /* -> m->pred */
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);
+/* Flush all deferred weight gradients (nn_set_defer_grads) — call after the
+ * batch's last model_backward, before the optimizer/reduction reads grads. */
+void  model_flush_grads(Model *m);
 void  model_free(Model *m);
 
 /* Loss = mean_i w_h(i)·huber(pred_i − Y_i) + lambda * mean(relu(0.6 - gate)^2).

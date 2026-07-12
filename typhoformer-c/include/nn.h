@@ -23,6 +23,7 @@ void nn_set_dropout(float p);
 void nn_dropout_seed(unsigned long s);
 unsigned long nn_dropout_state(void);   /* current thread's dropout RNG (to thread it across workers) */
 int  nn_training(void);
+float nn_dropout_draw(void);            /* uniform [0,1) from the thread-local training RNG */
 
 /* Pre-norm transformer blocks (LN before each sublayer) instead of the default
  * post-norm. Off by default. Read at block_forward/backward time. */
@@ -68,12 +69,33 @@ typedef struct {
     Mat   W, dW;       /* [out,in] parameter matrix and its gradient       */
     float *b, *db;     /* [out]    bias vector and its gradient            */
     Mat   xcache;      /* [T,in] forward input, cached for the backward   */
+    /* Deferred weight-gradient stash (see nn_set_defer_grads). st_x/st_dy hold
+     * the (x, dy) row pairs of every backward call since the last flush;
+     * st_n is the filled row count, st_cap the allocated rows. s_dWtmp is the
+     * flush scratch (dy_stashᵀ·x_stash before the += into dW). */
+    Mat   st_x, st_dy; int st_n, st_cap;
+    Mat   s_dWtmp;
 } Linear;
 
 Linear linear_new(int in, int out, ParamList *pl, const char *name);
 void   linear_forward(Linear *l, const Mat x, Mat y);        /* caches x */
 void   linear_backward(Linear *l, const Mat dy, Mat dx);     /* += grads; dx may be NULL */
+/* Flush this layer's deferred weight gradients (no-op when the stash is empty
+ * or deferral is off). Must be called before the optimizer reads dW/db. */
+void   linear_flush(Linear *l);
 void   linear_free(Linear *l);
+
+/* ---- deferred weight-gradient accumulation --------------------------- */
+/* OFF (default): linear_backward computes dW += dyᵀ·x immediately — one
+ * low-intensity 12-row GEMM per call that streams the whole [out,in] gradient
+ * matrix through the cache PER SAMPLE. ON: backward calls only append their
+ * (x, dy) rows to a per-layer stash (tiny copies) and linear_flush turns the
+ * whole batch into ONE high-intensity GEMM per layer — same math, ~batch×
+ * less dW memory traffic, different float summation order (like --threads).
+ * The trainer enables this and flushes per batch (model_flush_grads); the
+ * gradient-check tests leave it off so analytic grads appear immediately. */
+void nn_set_defer_grads(int on);
+int  nn_defer_grads(void);
 
 /* ---- LayerNorm over the last dimension ------------------------------ */
 /* Normalizes each row to zero mean / unit variance, then applies a learned
@@ -107,6 +129,7 @@ typedef struct {
 FFN  ffn_new(int d, int f, ParamList *pl, const char *name);
 void ffn_forward(FFN *ff, const Mat x, Mat y);
 void ffn_backward(FFN *ff, const Mat dy, Mat dx);
+void ffn_flush(FFN *ff);                 /* flush deferred dW (see nn_set_defer_grads) */
 void ffn_free(FFN *ff);
 
 /* ---- GRU cell:  h_t = GRU(x_t, h_{t-1}) ----------------------------- */
@@ -131,6 +154,7 @@ GRU  gru_new(int in, int hid, int max_steps, ParamList *pl, const char *name);
 void gru_forward(GRU *g, int step, const Mat x, const Mat hprev, Mat hout);
 /* Accumulates gate grads; writes dx and dhprev (either may be a NULL matrix). */
 void gru_backward(GRU *g, int step, const Mat dh, Mat dx, Mat dhprev);
+void gru_flush(GRU *g);                  /* flush deferred dW */
 void gru_free(GRU *g);
 
 /* ---- Single-head cross-attention (query -> fixed memory) ------------ */
@@ -159,6 +183,7 @@ void xattn_set_memory(CrossAttn *a, const Mat mem);          /* project K,V (T =
 void xattn_forward(CrossAttn *a, int step, const Mat x, Mat out);      /* out[1,d] */
 void xattn_backward_step(CrossAttn *a, int step, const Mat dout, Mat dx);  /* dx[1,qin]; accum dK,dV */
 void xattn_backward_memory(CrossAttn *a, Mat dmem);          /* dK,dV -> dmem[T,d] (after all steps) */
+void xattn_flush(CrossAttn *a);          /* flush deferred dW */
 void xattn_free(CrossAttn *a);
 
 /* ---- Multi-head self-attention over a sequence [S,D] ---------------- */
@@ -178,6 +203,7 @@ typedef struct {
 MHA  mha_new(int d_model, int n_heads, int self_only, ParamList *pl, const char *name);
 void mha_forward(MHA *m, const Mat x, Mat y);        /* self-attn over rows of x */
 void mha_backward(MHA *m, const Mat dy, Mat dx);
+void mha_flush(MHA *m);                  /* flush deferred dW */
 void mha_free(MHA *m);
 
 /* ---- Transformer block: MHA + res + LN -> FFN + res + LN (post-norm) */
@@ -197,6 +223,7 @@ typedef struct {
 Block block_new(int d_model, int n_heads, int ff_dim, int self_only, ParamList *pl, const char *name);
 void  block_forward(Block *b, const Mat x, Mat y);
 void  block_backward(Block *b, const Mat dy, Mat dx);
+void  block_flush(Block *b);             /* flush deferred dW */
 void  block_free(Block *b);
 
 #endif /* TYPHOFORMER_NN_H */

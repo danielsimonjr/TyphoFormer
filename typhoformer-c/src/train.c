@@ -233,9 +233,12 @@ static int cmd_train(int argc, char **argv) {
     int warmup = 0;                   /* linear LR warmup steps: lr ramps 0→lr over the first `warmup` steps (0 = off) */
     int no_text = 0;                  /* ablation: zero out the text-embedding stream (numbers-only model) */
     int motion = 0;                   /* feature aug: append (lat,lon,dlat,dlon) to numeric inputs — CHANGES d_num */
+    int no_lon = 0;                   /* ablation: zero --motion's ABSOLUTE-longitude column (memorization test) */
     int physics = 0;                  /* feature aug v2: acceleration, speed, heading, day-of-year — CHANGES d_num (+7) */
     float huber = 0.0f;               /* Huber loss transition point on the normalized residual (0 = MSE) */
     float hweight = 0.0f;             /* horizon-weight exponent: step h weighted (h+1)^γ, mean-normalized (0 = uniform) */
+    int tf_epochs = 0;                /* teacher forcing: anneal force-prob 1→0 over this many epochs (0 = off; cv head) */
+    int defer_dw = 0;                 /* deferred per-batch dW GEMMs (bit-identical; neutral on the reference box) */
     int delta = 0;                    /* decoder predicts displacement from the seed instead of absolute coords */
     /* --- decoder variants ---
      * These change the parameter set, so they must be set before model_new AND
@@ -283,9 +286,12 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--resume=", 9))    resume = argv[i] + 9;            /* checkpoint to continue from */
         else if (!strcmp(argv[i], "--no_text"))        no_text = 1;
         else if (!strcmp(argv[i], "--motion"))         motion = 1;
+        else if (!strcmp(argv[i], "--no_lon"))         no_lon = 1;
         else if (!strcmp(argv[i], "--physics"))        physics = 1;
         else if (!strncmp(argv[i], "--huber=", 8))     huber = (float)atof(argv[i] + 8);
         else if (!strncmp(argv[i], "--hweight=", 10))  hweight = (float)atof(argv[i] + 10);
+        else if (!strncmp(argv[i], "--tf=", 5))        tf_epochs = atoi(argv[i] + 5);
+        else if (!strcmp(argv[i], "--defer_dw"))       defer_dw = 1;
         else if (!strcmp(argv[i], "--delta"))          delta = 1;
         /* --gru and --xattn each force cv=1 too: they are curvature corrections
          * layered on top of the constant-velocity anchor, not standalone modes. */
@@ -326,6 +332,17 @@ static int cmd_train(int argc, char **argv) {
     if (bin) { c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text; }
     if (motion) dataset_add_motion(&ds);             /* +lat,lon,dlat,dlon (before standardize) — grows d_num by 4 */
     if (physics) dataset_add_physics(&ds);           /* +accel,speed,heading,seasonal phase — grows d_num by 7 */
+    /* --no_lon ablation: zero --motion's absolute-longitude column (index
+     * old_d_num+1 = d_num-3 with motion alone, or -10 with physics stacked on
+     * top). Tests whether absolute longitude is climatology signal or a
+     * memorization vector on 98 storms. Zeroing (not removing) keeps d_num —
+     * and therefore the checkpoint layout — unchanged; standardize sees a
+     * constant column and clamps its std to 1, so it stays zeros. */
+    if (no_lon && motion) {
+        int lon_col = ds.d_num - (physics ? 10 : 3);
+        for (int i = 0; i < ds.n_records; ++i) ds.num[(size_t)i * ds.d_num + lon_col] = 0.0f;
+        printf("ablation: absolute-longitude feature zeroed (--no_lon)\n");
+    }
     if (co_spatial) dataset_build_neighbors(&ds);    /* precompute co-active storm neighbours for the spatial branch */
     c.d_num = ds.d_num;                              /* lock the model's numeric input width to the (possibly grown) dataset */
     /* Leakage-safe: split whole STORMS into train/val/test, then fit feature +
@@ -369,6 +386,14 @@ static int cmd_train(int argc, char **argv) {
     nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
     /* Loss shaping (globals read by every model_loss call, both training paths). */
     model_set_huber(huber); model_set_hweight(hweight);
+    /* Deferred weight-gradient accumulation (--defer_dw): one dW GEMM per layer
+     * per BATCH instead of per sample. Bit-identical to the immediate path
+     * (pinned by tests/test_parallel's defer check) but measured NEUTRAL on the
+     * reference 4-core container — the backward is compute-bound, not
+     * dW-traffic-bound, at these model sizes (see FINDINGS). Kept opt-in for
+     * hardware where the gradient working set exceeds the last-level cache. */
+    nn_set_defer_grads(defer_dw);
+    if (tf_epochs > 0) printf("teacher forcing: prob 1 -> 0 over %d epochs (cv rollout)\n", tf_epochs);
     if (huber > 0.0f)    printf("loss: Huber, delta=%.3f (normalized residual)\n", huber);
     if (hweight != 0.0f) printf("loss: horizon-weighted, gamma=%.2f\n", hweight);
     ParamList pl; plist_init(&pl);                   /* flat registry of all trainable tensors + their grads */
@@ -419,6 +444,10 @@ static int cmd_train(int argc, char **argv) {
             int t = train[i]; train[i] = train[j]; train[j] = t; }
         double run_loss = 0.0; int nb = 0;           /* running sum of per-batch mean loss; batch counter */
         nn_set_training(1);                          /* dropout on for training */
+        /* Teacher-forcing schedule: linear anneal 1 → 0 over tf_epochs, then
+         * fully autoregressive. Set once per epoch, before any worker runs. */
+        model_set_tf_prob(tf_epochs > 0 && ep <= tf_epochs
+                          ? 1.0f - (float)(ep - 1) / (float)tf_epochs : 0.0f);
         /* Iterate the shuffled train set in contiguous minibatches. The last
          * batch may be short (bs < batch) when ntr is not a multiple of batch. */
         for (int b = 0; b < ntr; b += batch) {
@@ -439,6 +468,7 @@ static int cmd_train(int argc, char **argv) {
                     /* Serial-path-only auxiliary inputs, matched in evaluate(): */
                     if (co_spatial) { int nc; dataset_neighbors(&ds, train[b + k], nbr, &nc); model_set_neighbors(&m, nbr, nc); }
                     if (cv) { dataset_seed_velocity(&ds, train[b + k], vel); model_set_seed_velocity(&m, vel); }
+                    if (tf_epochs > 0) model_set_teacher(&m, Y);   /* rollout state correction targets */
                     model_forward(&m, xn, xt, yp);
                     /* Forward loss and its gradients (dpred, dgate) for one sample. */
                     bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
@@ -459,6 +489,7 @@ static int cmd_train(int argc, char **argv) {
                     for (int i = 0; i < c.in_len * c.d_model; ++i)  dgate.data[i] /= bs;
                     model_backward(&m, dpred, dgate);    /* accumulates into pl grads (no zero between k's) */
                 }
+                model_flush_grads(&m);               /* flush deferred dW: one GEMM per layer per batch */
                 run_loss += bl / bs;                 /* record the batch's MEAN loss */
             }
             /* One optimizer step per minibatch, shared by both paths. */
@@ -837,11 +868,25 @@ static int cmd_bench(int argc, char **argv) {
         model_backward(&m, dpred, dgate);
     }
     double fb = (double)(clock() - t0) / CLOCKS_PER_SEC / iters;          /* seconds per forward+backward */
+    /* The training step as cmd_train actually runs it: deferred dW, one flush
+     * per batch of 8 (see nn_set_defer_grads) — same math, less dW traffic. */
+    nn_set_defer_grads(1);
+    t0 = clock();
+    for (int i = 0; i < iters; ++i) {
+        model_forward(&m, xn, xt, yp);
+        model_loss(m.pred, Y, m.pgf.gate, 0.1f, dpred, dgate);
+        model_backward(&m, dpred, dgate);
+        if ((i + 1) % 8 == 0) model_flush_grads(&m);
+    }
+    model_flush_grads(&m);
+    double fbd = (double)(clock() - t0) / CLOCKS_PER_SEC / iters;
+    nn_set_defer_grads(0);
 
     printf("bench | d_model=%d d_ff=%d layers=%d heads=%d pred_len=%d | %ld params\n",
            c.d_model, c.d_ff, c.n_layers, c.n_heads, c.pred_len, plist_num_params(&pl));
     printf("  forward         : %8.3f ms/sample  (%8.1f samples/s)\n", fwd * 1e3, 1.0 / fwd);
     printf("  forward+backward: %8.3f ms/sample  (%8.1f samples/s)\n", fb * 1e3, 1.0 / fb);
+    printf("  fwd+bwd deferred: %8.3f ms/sample  (%8.1f samples/s)  [dW flushed per 8-batch]\n", fbd * 1e3, 1.0 / fbd);
     mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&dpred); mat_free(&dgate);
     model_free(&m); plist_free(&pl);
     return 0;

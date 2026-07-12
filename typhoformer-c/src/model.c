@@ -36,6 +36,16 @@ static int g_rotframe = 0;
 void model_set_rotframe(int on) { g_rotframe = on; }
 #define ROTF_EPS 1e-6f
 
+/* Teacher-forcing probability for the cv rollout (training only; eval always
+ * rolls out autoregressively). With probability p, a step's OUTPUT state is
+ * replaced by ground truth before the next step consumes it: p ← Y_s and the
+ * truth-implied velocity v ← Y_s − p_entry. Forced steps cut the recurrence
+ * gradient (truth is a constant), which is exactly the intended effect: early
+ * in training the rollout does not backpropagate through its own noisy
+ * predictions. The trainer anneals p → 0 (--tf=E). 0 = off (default). */
+static float g_tf_prob = 0.0f;
+void model_set_tf_prob(float p) { g_tf_prob = p; }
+
 /* Recurrent (GRU) decoder correction. Its rollout branch anchors at
  * constant-velocity itself (zero-init fc_out), so it needs no separate g_cv.
  * Off by default. */
@@ -298,6 +308,7 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
     /* rotframe applies to the plain cv head only (out_dim 2 by construction). */
     d.use_rotframe = (g_rotframe && g_cv && !g_gru && !g_xattn && c->out_dim == 2);
     d.frc = d.use_rotframe ? (Mat *)calloc(c->pred_len, sizeof(Mat)) : NULL;
+    d.tf_y = NULL; d.forced = (int *)calloc(c->pred_len, sizeof(int));
     if (g_xattn) {
         /* per-step context = cross-attention([p;v] query over encoder sequence);
          * fed to the cv MLP in place of the static pooled context. */
@@ -451,6 +462,22 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
                 p.data[i]  = y;
                 preds.data[s * O + i] = y;
             }
+            /* Teacher forcing (training only; d->tf_y is NULL otherwise): with
+             * prob g_tf_prob, hand the NEXT step ground-truth state instead of
+             * the model's own — position ← Y_s, velocity ← the truth-implied
+             * step displacement Y_s − p_entry (p at this step's input, still in
+             * zc). The prediction just emitted is untouched; only the rollout
+             * state is corrected. forced[s] tells the backward that no gradient
+             * flows into this step from later steps (truth is constant). */
+            d->forced[s] = 0;
+            if (d->tf_y && s + 1 < steps && nn_dropout_draw() < g_tf_prob) {
+                d->forced[s] = 1;
+                for (int i = 0; i < O; ++i) {
+                    float p_entry = d->zc[s].data[H + i];
+                    p.data[i] = d->tf_y[s * O + i];
+                    v.data[i] = d->tf_y[s * O + i] - p_entry;
+                }
+            }
         }
         return;
     }
@@ -560,6 +587,9 @@ void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
         Mat dc = d->s_dyt, dpnext = d->s_dynext, dvnext = d->s_dvnext;
         mat_zero(d->s_dhacc); mat_zero(dpnext); mat_zero(dvnext);
         for (int s = steps - 1; s >= 0; --s) {
+            /* Teacher-forced step: its produced state was replaced by truth, so
+             * no gradient arrives from later steps — cut the recurrence here. */
+            if (d->forced[s]) { mat_zero(dpnext); mat_zero(dvnext); }
             /* dc is the grad on the GLOBAL correction c_glob (it feeds pred_s,
              * p_{s+1}, v_{s+1}). */
             for (int i = 0; i < O; ++i)
@@ -631,6 +661,7 @@ void decoder_free(Decoder *d) {
     if (d->use_xattn)      { xattn_free(&d->xattn); mat_free(&d->s_xq); mat_free(&d->s_dmem); }
     for (int s = 0; s < d->max_steps; ++s) { mat_free(&d->zc[s]); mat_free(&d->h1c[s]); mat_free(&d->ac[s]); }
     if (d->frc) { for (int s = 0; s < d->max_steps; ++s) mat_free(&d->frc[s]); free(d->frc); }
+    free(d->forced);
     free(d->zc); free(d->h1c); free(d->ac);
     mat_free(&d->s_yt); mat_free(&d->s_a); mat_free(&d->s_ytn); mat_free(&d->s_v);
     mat_free(&d->s_da); mat_free(&d->s_dh1); mat_free(&d->s_dz);
@@ -711,6 +742,7 @@ Model model_new(const Config *c, ParamList *pl) {
     m.dec = decoder_new(c, pl);
     m.nbr = mat_new(TF_NBR_K, TF_NBR_NF); m.nbr_cnt = 0;
     m.vseed = mat_new(1, c->out_dim); mat_zero(m.vseed);
+    m.tf_Y = mat_new(c->pred_len, c->out_dim); m.tf_set = 0;
     m.xtilde  = mat_new(c->in_len, c->d_model);
     m.henc    = mat_new(1, c->d_model);
     m.henc2   = mat_new(1, c->d_model);
@@ -726,11 +758,17 @@ void model_set_neighbors(Model *m, const Mat nbr, int cnt) {
 void model_set_seed_velocity(Model *m, const Mat v) {
     mat_copy(m->vseed, v);
 }
+void model_set_teacher(Model *m, const Mat Y) {
+    mat_copy(m->tf_Y, Y); m->tf_set = 1;
+}
 /* Full forward: fuse -> encode -> (co-spatial refine) -> decode.
  * The decoder's context is henc, or henc2 when co-spatial attention is on.
  * In --xattn mode the encoder's per-step sequence is handed to the decoder's
  * cross-attention as the fixed K/V memory before the rollout. */
 void model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev) {
+    /* Teacher forcing is armed only while training with p>0 and a teacher set;
+     * eval and gradient checks (training off) always roll out autoregressively. */
+    m->dec.tf_y = (nn_training() && g_tf_prob > 0.0f && m->tf_set) ? m->tf_Y.data : NULL;
     pgf_forward(&m->pgf, xnum, xtext, m->xtilde);
     encoder_forward(&m->enc, m->xtilde, m->henc);
     if (m->dec.use_xattn) xattn_set_memory(&m->dec.xattn, m->enc.encseq);   /* memory = encoder seq */
@@ -754,10 +792,29 @@ void model_backward(Model *m, const Mat dpred, const Mat dgate_pen) {
     encoder_backward(&m->enc, m->dhenc, m->dxtilde);
     pgf_backward(&m->pgf, m->dxtilde, dgate_pen);
 }
+/* Flush every Linear's deferred weight-gradient stash (see nn_set_defer_grads).
+ * Must be called after the last model_backward of a batch and before the
+ * optimizer (or gradient reduction) reads the gradients. No-op when deferral
+ * is off or nothing is stashed. Walks exactly the Linears that exist for the
+ * current architecture flags — the same set model_new allocated. */
+void model_flush_grads(Model *m) {
+    if (!nn_defer_grads()) return;
+    linear_flush(&m->pgf.fc_gate); linear_flush(&m->pgf.proj_num); linear_flush(&m->pgf.proj_text);
+    linear_flush(&m->enc.input_proj); linear_flush(&m->enc.output_proj);
+    for (int l = 0; l < m->cfg.n_layers; ++l) {
+        block_flush(&m->enc.temporal[l]);
+        if (m->enc.use_spatial) block_flush(&m->enc.spatial[l]);
+    }
+    if (m->use_co) { linear_flush(&m->co.proj); mha_flush(&m->co.attn); }
+    if (m->dec.use_gru)        { gru_flush(&m->dec.gru); linear_flush(&m->dec.fc_out); }
+    else                       { linear_flush(&m->dec.fc1); linear_flush(&m->dec.fc2); }
+    if (m->dec.use_xattn)      xattn_flush(&m->dec.xattn);
+}
+
 void model_free(Model *m) {
     pgf_free(&m->pgf); encoder_free(&m->enc); decoder_free(&m->dec);
     if (m->use_co) cospatial_free(&m->co);
-    mat_free(&m->nbr); mat_free(&m->vseed);
+    mat_free(&m->nbr); mat_free(&m->vseed); mat_free(&m->tf_Y);
     mat_free(&m->xtilde); mat_free(&m->henc); mat_free(&m->henc2);
     mat_free(&m->dhenc); mat_free(&m->dhenc2);
     mat_free(&m->dxtilde); mat_free(&m->pred);
