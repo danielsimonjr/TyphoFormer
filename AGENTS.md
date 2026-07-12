@@ -39,7 +39,7 @@ make -C backends/cuda   # compile the CUDA backend with nvcc
 ```bash
 ./typhoformer 30                          # train 30 epochs, compact demo config
 ./typhoformer 30 --full --threads=8       # full paper config (d_model=256, 3 layers), data-parallel
-./typhoformer train 30 --motion --physics --cv --save=m.ckpt   # the accurate configuration (works serial or --threads=N)
+./typhoformer train 30 --motion --physics --cv --huber=0.1 --save=m.ckpt   # the best-known recipe (works serial or --threads=N)
 ./typhoformer eval --weights=m.ckpt       # MAE + spherical ΔR, per horizon
 ./typhoformer predict --weights=m.ckpt --n=50 --out=pred.csv
 ./typhoformer baseline --pred_len=4       # persistence + constant-velocity baselines
@@ -80,6 +80,6 @@ Every forward pass has a matching hand-written backward, proven by a **finite-di
 
 ### Findings context (matters for experiment work)
 
-`typhoformer-c/docs/FINDINGS.md` is the honest experimental record. Key conclusions: the default input featurization is blind to motion (intensity + text only), so train with `--motion --physics --cv` for real accuracy (held-out ΔR 131→39.1 km @ 6h, on the CLIPER bar; beats constant-velocity at 48h; works with `--threads=N`); the language branch does **not** help on this data (`--no_text` is marginally better); the honest baseline is constant-velocity (~39 km @ 6h), not persistence; decoder memory (`--gru`/`--xattn`) did not survive a five-split re-test (§11) — single-split results on 98 storms can flip under float-rounding-level perturbations, so always test across multiple `--split_seed`s. An earlier "beats persistence" result was data leakage — the storm-level split and train-only stats exist to prevent that regression. Report held-out test numbers, not validation numbers.
+`typhoformer-c/docs/FINDINGS.md` is the honest experimental record. Key conclusions: the default input featurization is blind to motion (intensity + text only), so train with `--motion --physics --cv --huber=0.1` for real accuracy (held-out ΔR 131→38.5 km @ 6h, under the CLIPER bar; best-known at 48h too; works with `--threads=N`); the language branch does **not** help on this data (`--no_text` is marginally better); the honest baseline is constant-velocity (~39 km @ 6h), not persistence; decoder memory (`--gru`/`--xattn`) did not survive a five-split re-test (§11) — single-split results on 98 storms can flip under float-rounding-level perturbations, so always test across multiple `--split_seed`s. An earlier "beats persistence" result was data leakage — the storm-level split and train-only stats exist to prevent that regression. Report held-out test numbers, not validation numbers.
 
 Other docs: `docs/ARCHITECTURE.md` (full layer-by-layer math), `docs/THEORY_MAP.md` (equation → `file:function`), `docs/API.md` (memory/ownership/concurrency model), `docs/INTEGRATION.md` (embedding as a library, file formats), `docs/LABS.md`, `docs/GLOSSARY.md`.

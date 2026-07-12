@@ -120,12 +120,14 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. `--emb=none` = **text-free mode**: the language branch is fed zeros (== `--no_text`), so CSVs converted from raw HURDAT2 train without any embeddings. | repo defaults |
 
-**For accuracy, train with `--motion --physics --cv`**: motion features give the
-model the trajectory signal, the physics features add the curvature signal
-(heading, acceleration, seasonal phase — better on all five test splits), and
-the constant-velocity anchor lets it start at CLIPER and learn only the
-correction — held-out ΔR ~39.1 km at 6h, and the cv decoder beats
-constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13).
+**For accuracy, train with `--motion --physics --cv --huber=0.1`** (the
+best-known recipe at both horizons): motion features give the model the
+trajectory signal, the physics features add the curvature signal (heading,
+acceleration, seasonal phase — better on all five test splits), the
+constant-velocity anchor lets it start at CLIPER and learn only the
+correction, and the Huber loss tames outlier storms — held-out ΔR
+**38.5 km at 6h (under the ~39.4 km CLIPER bar)** and best-known at 48h
+(see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13/§14).
 All decoder variants work on both the serial and the data-parallel
 (`--threads=N`) paths. `eval`/`predict` auto-detect `--motion`/`--physics` from
 the checkpoint's feature count; pass `--delta`/`--cv` to `eval` to match the
@@ -299,6 +301,7 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 | `--motion --delta --no_text` (numbers only) | 46.7 ± 4.8 km | 2.6× better |
 | **`--motion --cv`** (constant-velocity decoder) | **40.8 km** | **reaches CLIPER (~39 km)** |
 | **`--motion --physics --cv`** (+ heading/accel/season; no-spatial default) | **39.1 km** | **on CLIPER; better on 5/5 splits** |
+| **`--motion --physics --cv --huber=0.1`** (the recipe) | **38.5 km** | **under CLIPER (~39.4 km); best-known at 48h too** |
 
 `--cv` anchors the decoder at constant-velocity extrapolation and learns only the
 curvature — the first architectural change that reaches the constant-velocity

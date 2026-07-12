@@ -497,7 +497,71 @@ robustness mechanisms collapse variance, averaging buys insurance, and imposing
 structure the network can already learn does not help — nothing moves the
 number a lot, because the ceiling is still 98 storms.
 
-## 14. What this means
+## 14. Third round: tuning, composition, and the ablations that close the book
+
+The remaining suggestions from the optimization review, run as one battery
+(~80 runs, standard protocol, no-spatial default; baselines are §13's
+`--motion --physics --cv` numbers: 39.10 km @ 6h, 285.0 @ 48h).
+
+**Capacity is flat — the compact config was already at the knee.** Held-out 6h
+mean over seeds 1/3/5, `d_ff = 2·d_model`: d_model 32 → 40.1, 48 → 40.3,
+**64 → 39.3**, 96 → 40.0. Nothing to gain in either direction; §3's lesson
+(capacity is not the constraint) holds at every scale tried.
+
+**Hyperparameters were already near-optimal — except dropout.** A 16-config
+random search on split 3 (selected on VAL, never test) spans a val range of
+only 34.8–36.3 km against the default's 35.3 — the defaults sit mid-pack of a
+tight field. The best-val config differs from the defaults only in
+**dropout 0.2**, and validates across all five splits: **38.50 vs 39.10 km**
+(better on 4/5). A decade of defaults-tuning fear, worth half a kilometre.
+
+**The recipe: `--motion --physics --cv --huber=0.1` is the new best-known
+configuration at BOTH horizons.**
+
+| config | 6h mean (5 seeds) | 48h mean (5 seeds) |
+|:--|:--:|:--:|
+| physics baseline (§13) | 39.10 | 285.0 |
+| + `--huber=0.1` (**the recipe**) | **38.45 ± 1.4** | **275.3** |
+| + `--dropout=0.2` as well | 38.29 ± 2.4 | 284.9 |
+| *CLIPER bar* | *39.4* | *≈300 (§11)* |
+
+The recipe beats the physics baseline on 4/5 splits at both horizons and puts
+the 6h mean **under the CLIPER bar**. Two honest wrinkles: (1) **gains do not
+stack** — physics, huber, and dropout 0.2 are each worth ~0.6 km alone but
+compose to ~0.8, not 1.9: they are overlapping regularizers, not independent
+signals; (2) the extra dropout **helps at 6h but hurts at 48h** (284.9 vs
+275.3), so the recommended recipe leaves dropout at the 0.1 default.
+Recipe ensembles (3 members/split) land at-or-under the best member on every
+split (40.20 / 40.28 / 36.69 on splits 1/3/5) — the §13 insurance, preserved.
+
+**Window length: 12 steps was right, and longer is worse.** 6h mean over seeds
+1/3/5: in_len 8 → 38.9, **12 → 39.3**, 16 → 42.0, 20 → 42.3. Three extra days
+of history costs 3 km — more attention surface to fit, fewer training windows
+per storm, no added signal. (8 is marginally better than 12 but within noise.)
+
+**Absolute longitude carries no robust signal.** Zeroing it (`--no_lon`):
+38.83 vs 39.10 mean, better on 3/5 splits — neutral-to-marginally-better. The
+model was partly *geolocating* rather than generalizing; with more storms this
+ablation is worth repeating in reverse (does longitude start to pay when the
+basin is densely sampled?).
+
+**Teacher forcing: neutral.** Annealing forced rollouts over 10 epochs at 48h:
+283.7 vs 285.0, better on 3/5 — inside noise. The cv anchor already gives the
+early rollout a sane trajectory, which is presumably why truth-feeding adds
+nothing; the flag stays for larger-data retests.
+
+**And one speed hypothesis refuted en route:** deferring dW accumulation to
+one GEMM per layer per batch (`--defer_dw`) is bit-identical and measured
+*neutral* — the backward is compute-bound, not gradient-traffic-bound, at
+these model sizes. Recorded so nobody re-derives that theory.
+
+**Where this leaves the number.** From the original honest baseline (131 km,
+blind to motion) to **38.5 km @ 6h** — under constant-velocity — via, in
+order of impact: motion features, the cv anchor, physics features, a robust
+loss, and one dropout notch. Every remaining candidate on the board is either
+measured-neutral or waiting on more storms.
+
+## 15. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
