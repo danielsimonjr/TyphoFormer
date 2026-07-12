@@ -244,6 +244,7 @@ static int cmd_train(int argc, char **argv) {
      * on both the serial and the data-parallel (--threads=N) paths: the workers
      * feed the same per-sample aux inputs (seed velocity, neighbours). */
     int cv = 0;                       /* constant-velocity anchor + learned curvature (2nd-order motion model) */
+    int rotframe = 0;                 /* cv correction in the motion-aligned (along/cross-track) frame */
     int gru = 0;                      /* cv + a recurrent GRU memory over horizons (implies cv) */
     int xattn = 0;                    /* cv + decoder cross-attention over the encoder sequence (implies cv) */
     int km_loss = 0;                  /* reweight the longitude gradient by cos^2(lat) so loss ≈ km error (serial only) */
@@ -289,6 +290,7 @@ static int cmd_train(int argc, char **argv) {
         /* --gru and --xattn each force cv=1 too: they are curvature corrections
          * layered on top of the constant-velocity anchor, not standalone modes. */
         else if (!strcmp(argv[i], "--cv"))             cv = 1;
+        else if (!strcmp(argv[i], "--rotframe"))     { rotframe = 1; cv = 1; }  /* implies the cv anchor */
         else if (!strcmp(argv[i], "--gru"))          { gru = 1; cv = 1; }
         else if (!strcmp(argv[i], "--xattn"))        { xattn = 1; cv = 1; }
         else if (!strcmp(argv[i], "--km_loss"))        km_loss = 1;
@@ -332,7 +334,7 @@ static int cmd_train(int argc, char **argv) {
      * Splitting by storm — not by sample — prevents windows from the same
      * cyclone leaking across the train/val/test boundary, which would let the
      * model "cheat" by memorizing a track it also scores on. */
-    ds.no_text = no_text;                            /* propagate the numbers-only ablation into dataset_get() */
+    ds.no_text |= no_text;                           /* propagate the numbers-only ablation (--emb=none already set it) */
     /* 0.15 val + 0.15 test => 0.70 train, keyed by split_seed for reproducibility. */
     Split sp = dataset_split3(&ds, 0.15f, 0.15f, split_seed);
     dataset_standardize(&ds);                        /* z-score features + coords using TRAIN-only statistics */
@@ -360,6 +362,9 @@ static int cmd_train(int argc, char **argv) {
     else if (xattn) model_set_xattn(1);
     else if (cv)    model_set_cv(1);          /* cv is a superset of delta; takes precedence */
     else if (delta) model_set_delta(1);
+    model_set_rotframe(rotframe);             /* plain-cv head only (no-op for gru/xattn) */
+    if (rotframe && (gru || xattn)) printf("note: --rotframe applies to the plain cv head only\n");
+    else if (rotframe) printf("decoder: motion-aligned (along/cross-track) correction frame\n");
     model_set_no_spatial(!spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
     nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
     /* Loss shaping (globals read by every model_loss call, both training paths). */
@@ -570,6 +575,7 @@ static int cmd_eval(int argc, char **argv) {
         /* Structural flags — MUST match the checkpoint's training flags: */
         else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
         else if (!strcmp(argv[i], "--cv"))            model_set_cv(1);
+        else if (!strcmp(argv[i], "--rotframe"))    { model_set_cv(1); model_set_rotframe(1); }
         else if (!strcmp(argv[i], "--gru"))           model_set_gru(1);
         else if (!strcmp(argv[i], "--xattn"))         model_set_xattn(1);
         else if (!strcmp(argv[i], "--spatial"))       model_set_no_spatial(0);  /* ckpt trained with spatial blocks */
@@ -599,7 +605,7 @@ static int cmd_eval(int argc, char **argv) {
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin && ds.d_text != c.d_text) { die("d_text mismatch (data %d vs model %d)", ds.d_text, c.d_text); }
 
-    ds.no_text = no_text;
+    ds.no_text |= no_text;                           /* --emb=none already set it */
     apply_feature_aug(&ds, c.d_num);                /* re-apply the ckpt's --motion/--physics (width arithmetic) */
     if (co_spatial) dataset_build_neighbors(&ds);
     apply_ckpt_stats(&ds, wlist[0]);                 /* reuse the checkpoint's train-only normalization */

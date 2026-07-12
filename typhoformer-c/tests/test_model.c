@@ -104,6 +104,13 @@ int main(void) {
     model_set_cv(1);
     fail |= check_model("cv", 1);
     fail |= check_model("cv+multistep", 3);
+    /* the motion-aligned frame's rotation backward (Rᵀ path + the ∂u/∂v
+     * Jacobian into the velocity recurrence); vel is random nonzero so the
+     * frame is active, and multistep exercises the threaded dv path. */
+    model_set_rotframe(1);
+    fail |= check_model("cv+rotframe", 1);
+    fail |= check_model("cv+rotframe+multistep", 3);
+    model_set_rotframe(0);
     model_set_cv(0);
     model_set_gru(1);
     fail |= check_model("gru", 1);

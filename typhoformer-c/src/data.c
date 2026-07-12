@@ -223,9 +223,22 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
      * The MiniLM text embeddings were precomputed offline and saved as one or
      * more emb_chunk_*.npy files, each [rows, 384]. Concatenated in sorted name
      * order they must line up 1:1 with the CSV records (row i of emb <-> record
-     * i), so the final `got` count must equal `n` or the data is misaligned. */
+     * i), so the final `got` count must equal `n` or the data is misaligned.
+     *
+     * `--emb=none` is the TEXT-FREE path: no embeddings exist (e.g. a CSV
+     * converted straight from raw HURDAT2 by tools/hurdat2_to_csv.py). The
+     * language branch is fed all-zero vectors — exactly what the --no_text
+     * ablation feeds, which FINDINGS §2/§6 measured as marginally BETTER than
+     * real text — and no_text is set so downstream code knows. Explicit opt-in
+     * ("none"), not a fallback: a typo'd embedding path still dies loudly. */
+    if (strcmp(embdir, "none") == 0) {
+        d.emb = calloc((size_t)n * d.d_text, sizeof(float));
+        d.no_text = 1;
+        printf("text-free mode (--emb=none): language branch fed zeros (== --no_text)\n");
+        goto windows;
+    }
     char **names; int nc = list_emb_chunks(embdir, &names);
-    if (nc <= 0) { die("no emb_chunk_*.npy in %s", embdir); }
+    if (nc <= 0) { die("no emb_chunk_*.npy in %s (use --emb=none for text-free data)", embdir); }
     d.emb = malloc((size_t)n * d.d_text * sizeof(float));
     int got = 0;
     for (int i = 0; i < nc; ++i) {
@@ -239,6 +252,7 @@ Dataset dataset_load(const char *csv, const char *embdir, int in_len, int pred_l
     free(names);
     if (got != n) { die("embeddings (%d) != records (%d)", got, n); }
 
+windows:
     /* Features/coords are left RAW here; dataset_split3 + dataset_standardize
      * fit and apply normalization on the TRAIN storms only (no leakage).
      * Until then, coordinate stats are identity so dataset_get returns degrees. */

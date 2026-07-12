@@ -139,7 +139,9 @@ typedef struct {
     GRU    gru; Linear fc_out;          /* recurrent correction (--gru mode)     */
     CrossAttn xattn;                    /* per-step encoder cross-attention (--xattn) */
     int    hidden, out, max_steps, use_cv, use_gru, use_xattn;
+    int    use_rotframe;                /* cv correction in the motion-aligned frame */
     Mat   *zc, *h1c, *ac;               /* per-step caches (autoregressive rollout) */
+    Mat   *frc;                         /* per-step frame cache [1,5]: u0,u1,|v|,c_local0,c_local1 (rotframe) */
     Mat    s_yt, s_a, s_ytn, s_v;       /* forward scratch (s_v: cv velocity) */
     Mat    s_da, s_dh1, s_dz, s_dyt, s_dynext, s_dvnext, s_dhacc;  /* backward scratch */
     Mat    s_hid0, s_dhid, s_dhc, s_dx2;  /* gru scratch (initial hidden, hidden grads, dx) */
@@ -167,6 +169,14 @@ int     model_delta(void);
  * BEFORE building the model; feed each sample's seed velocity with
  * model_set_seed_velocity. Off by default; takes precedence over --delta. */
 void    model_set_cv(int on);
+
+/* Motion-aligned frame for the cv correction: the MLP output is read as
+ * (along-track, cross-track) components and rotated into lat/lon by the current
+ * velocity direction, making the learned curvature rotation-invariant.
+ * Parameter-free (checkpoint layout unchanged), but eval must use the same
+ * flag. Applies to the plain cv head only. Set BEFORE model_new. Off by
+ * default. */
+void    model_set_rotframe(int on);
 
 /* Recurrent decoder: the constant-velocity rollout's curvature correction is
  * produced by a GRU whose hidden state is carried across steps (initialised from
