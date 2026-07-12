@@ -17,6 +17,10 @@ static Dataset synth_dataset(int n, int in_len, int pred_len, int d_num, int d_t
     Dataset d; memset(&d, 0, sizeof d);
     d.n_samples = n; d.in_len = in_len; d.pred_len = pred_len;
     d.d_num = d_num; d.d_text = d_text; d.prewindowed = 1;
+    /* identity coordinate stats: memset left cstd at 0, and cnorm() divides by
+     * cstd — without this every coordinate became inf/NaN and the whole test
+     * compared NaN losses (which pass any '>' threshold check vacuously). */
+    d.cstd[0] = d.cstd[1] = 1.0f;
     int F = d_num + d_text;
     d.win_in = (float *)malloc((size_t)n * in_len * F * sizeof(float));
     d.win_tg = (float *)malloc((size_t)n * pred_len * 2 * sizeof(float));
@@ -87,7 +91,9 @@ int main(void) {
                 if (rel > max_rel)    max_rel = rel;
             }
         double lerr = fabs(ploss - sloss);
-        int fail = (max_abs > 1e-4f) || (lerr > 1e-4);
+        /* NaN-proof comparison: !(x <= tol) is true for x > tol AND for NaN,
+         * so a NaN loss or gradient can never slip through as a pass. */
+        int fail = !(max_abs <= 1e-4f) || !(lerr <= 1e-4) || isnan(sloss) || isnan(ploss);
         printf("threads=%d | loss serial=%.6f parallel=%.6f (|d|=%.2e) | grad max abs=%.2e rel=%.2e  %s\n",
                nw, sloss, ploss, lerr, max_abs, max_rel, fail ? "FAIL" : "ok");
         if (fail) worst_fail = 1;

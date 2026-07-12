@@ -117,21 +117,46 @@ void mat_matmul(const Mat A, const Mat B, Mat out) {
  * output neuron j owns a contiguous weight row B[j,:].
  *
  * Here the shared/summed dimension is k = A.cols = B.cols (asserted). Both
- * Arow = A[i,:] and Brow = B[j,:] are contiguous, so the innermost p-loop is a
- * clean stride-1 dot product accumulated into a local `acc`. Because each
- * out[i,j] is written exactly once from acc, no mat_zero is needed (unlike the
- * accumulate-in-place variants). `restrict` again asserts non-aliasing to help
- * the compiler vectorize the reduction. */
+ * Arow = A[i,:] and Brow = B[j,:] are contiguous, so the p-loop is a stride-1
+ * dot product. Because each out[i,j] is written exactly once, no mat_zero is
+ * needed (unlike the accumulate-in-place variants).
+ *
+ * The dot product is split across EIGHT independent accumulators (a0..a7), each
+ * owning every 8th product. A single-accumulator reduction is a loop-carried
+ * dependency chain — one add must retire before the next can start, capping the
+ * loop at 1 FMA per add-latency (~4-5 cycles) — and the compiler may not break
+ * that chain itself, because float addition is not associative and -O3 alone
+ * (without -ffast-math) must preserve the source's summation order. Writing the
+ * eight partial sums explicitly performs that reassociation in the source, so
+ * the compiler can both pipeline the adds and SLP-vectorize the accumulator
+ * bank into SIMD registers. The tail loop folds the k%8 leftovers into acc.
+ * NOTE: this fixes a DIFFERENT summation order than the naive loop, so results
+ * differ from it at the float rounding level (~1e-7 relative) — an intentional
+ * numerics change, pinned by the golden test's updated value. */
 void mat_matmul_bt(const Mat A, const Mat B, Mat out) {
     /* out = A @ B^T ; A[m,k], B[n,k], out[m,n] (contiguous dot products) */
     assert(A.cols == B.cols && out.rows == A.rows && out.cols == B.rows);
     const int m = A.rows, k = A.cols, n = B.rows;
+    const int k8 = k & ~7;                              /* largest multiple of 8 <= k */
     for (int i = 0; i < m; ++i) {
         const float *restrict Arow = &A.data[i * k];        /* A[i, :] */
         for (int j = 0; j < n; ++j) {
             const float *restrict Brow = &B.data[j * k];    /* B[j, :] */
-            float acc = 0.0f;
-            for (int p = 0; p < k; ++p) acc += Arow[p] * Brow[p]; /* dot(A[i,:], B[j,:]) */
+            float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+            float a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
+            for (int p = 0; p < k8; p += 8) {           /* 8 independent partial dots */
+                a0 += Arow[p    ] * Brow[p    ];
+                a1 += Arow[p + 1] * Brow[p + 1];
+                a2 += Arow[p + 2] * Brow[p + 2];
+                a3 += Arow[p + 3] * Brow[p + 3];
+                a4 += Arow[p + 4] * Brow[p + 4];
+                a5 += Arow[p + 5] * Brow[p + 5];
+                a6 += Arow[p + 6] * Brow[p + 6];
+                a7 += Arow[p + 7] * Brow[p + 7];
+            }
+            /* pairwise fold, then the scalar tail for k not divisible by 8 */
+            float acc = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
+            for (int p = k8; p < k; ++p) acc += Arow[p] * Brow[p];
             out.data[i * n + j] = acc;                      /* single write, no += */
         }
     }
