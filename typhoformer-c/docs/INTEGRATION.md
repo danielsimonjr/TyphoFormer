@@ -174,7 +174,8 @@ general `.npy` reader.
 | `--threads=N` (training) | Data-parallel SGD across cores via `ParTrainer` ([parallel.h](../include/parallel.h)); near-linear scaling to the core count, gradient-equivalent to serial. |
 | Backend | Every layer is built from the ~13 kernels in [backend.h](../include/backend.h). Swap `src/tensor.c` for a SIMD/GPU backend (CUDA reference in [backends/](../backends/)) to move compute off the CPU. |
 
-Each `model_forward` is hand-written, cache-blocked (`ikj`/`pij`) and does no
+Each `model_forward` is hand-written, cache-aware (`ikj`/`pij` loop orders,
+unrolled-accumulator dot products that auto-vectorize at `-O3`) and does no
 per-step heap allocation, so latency is stable and predictable — a good fit for
 embedded / edge deployment where a BLAS/GPU stack is unavailable. Training scales
 across cores with `--threads=N`; inference scales by running one instance per

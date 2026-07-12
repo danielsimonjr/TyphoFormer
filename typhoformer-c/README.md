@@ -113,12 +113,15 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
 
-**For accuracy, train with `--motion --delta`.** Motion features give the model
-the trajectory signal, and the displacement head lets it start at persistence and
-learn the correction; together they take held-out ΔR from ~128 km to ~48 km (see
-[docs/FINDINGS.md](docs/FINDINGS.md)). `eval`/`predict` auto-detect `--motion`
-from the checkpoint's feature count; pass `--delta` to `eval` to match a
-displacement-head checkpoint.
+**For accuracy, train with `--motion --cv`** (serial path, `--threads=1`): motion
+features give the model the trajectory signal, and the constant-velocity anchor
+lets it start at CLIPER and learn only the curvature — held-out ΔR ~40.5 km at
+6h, and it beats constant-velocity at 48h (see
+[docs/FINDINGS.md](docs/FINDINGS.md) §9/§11). When you need multicore
+(`--threads=N`), use `--motion --delta` instead (~48 km): the displacement head
+starts at persistence and works on the data-parallel path. `eval`/`predict`
+auto-detect `--motion` from the checkpoint's feature count; pass `--delta`/`--cv`
+to `eval` to match the checkpoint's decoder.
 
 `--no_text` is the key scientific control: it tests whether the GPT-4o/MiniLM
 language branch — the paper's central premise — actually helps versus a
@@ -183,17 +186,26 @@ python tools/npy_dict_to_bin.py ../data/val ../data/val.tfb
 
 ### Performance
 
-Math is hand-written and cache-blocked (`ikj`/`pij` loop orders, `restrict`
-pointers), built at `-O3`. Backward passes reuse persistent per-module scratch
+Math is hand-written and cache-aware (`ikj`/`pij` accumulation loop orders,
+`restrict` pointers), built at `-O3`. The linear-layer forward kernel
+(`mat_matmul_bt`) splits each dot product across 8 independent accumulators,
+breaking the float-addition dependency chain so the compiler can pipeline and
+auto-vectorize it without `-ffast-math` — this alone made the full-config
+forward pass 5.6× faster. Backward passes reuse persistent per-module scratch
 buffers, so training does no per-step heap allocation.
+
+Measured on a 4-core container, single-threaded (epoch = 1097 train samples +
+per-epoch validation; your hardware will vary — rerun `bench` to check):
 
 | Build | Compact config | Full paper config (5.1 M params) |
 |:--|:--:|:--:|
-| `make` (portable `-O3`) | ~3 s/epoch | ~190 s/epoch |
-| `make NATIVE=1` (`-march=native`) | ~3 s/epoch | **~99 s/epoch** |
+| `make` (portable `-O3`) | ~1.2 s/epoch | ~40 s/epoch |
+| `make NATIVE=1` (`-march=native`) | ~1.2 s/epoch | **~31 s/epoch** |
 
-Native SIMD roughly halves the full-config epoch time; `--threads=N` adds
-data-parallel scaling across cores on top (see **Multicore training** above).
+(`bench`, full config: portable 10.8 ms forward / 39.6 ms forward+backward per
+sample; NATIVE 6.1 / 20.9 ms.) Native SIMD adds another ~25% on the full
+config; `--threads=N` adds data-parallel scaling across cores on top (see
+**Multicore training** above).
 For a GPU or other accelerator, implement the ~13-kernel contract in
 [`include/backend.h`](include/backend.h): [`backends/opencl/`](backends/opencl/)
 is a **runnable** OpenCL backend (`make OPENCL=1 test-opencl` verifies the whole
@@ -232,7 +244,7 @@ The unit tests double as the correctness contract for every extension seam:
 | `test_parallel` | multicore gradient == serial gradient (≈1e-7). |
 | `test_checkpoint`, `test_npy` | checkpoint round-trip (TFW1/2/3 + optimizer sidecar), `.npy` dtype/fortran validation, storm-safe split. |
 | `test_dropout` | dropout is identity at eval; its backward (pinned-mask) gradient-checks. |
-| `backends/opencl/test_opencl` | OpenCL kernels match the CPU reference (≤1.2e-7); model runs through OpenCL. |
+| `backends/opencl/test_opencl` | OpenCL kernels match the CPU reference (float-rounding level); model runs through OpenCL. |
 
 ## Status — complete
 
@@ -281,8 +293,9 @@ The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
 default model was **blind to motion** (its inputs are intensity + text; position
 and velocity were never fed in), so it lost to a two-line physics baseline.
 Feeding motion and predicting displacement takes held-out ΔR from **128 km → 48
-km** — 2.5× better than persistence and competitive with constant-velocity. And
-the **language branch still doesn't help** even with a working model
+km**; anchoring the decoder at constant-velocity (`--cv`) reaches **40.5 km** —
+matching CLIPER at 6h and **beating it at 48h on 4 of 5 splits**. And the
+**language branch still doesn't help** even with a working model
 (numbers-only is marginally *better*), a robust negative result on this data.
 
 > **Honesty note.** Earlier versions reported ΔR ≈ 79 km "beating persistence."
