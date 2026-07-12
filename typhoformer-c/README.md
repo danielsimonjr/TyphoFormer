@@ -115,7 +115,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 
 **For accuracy, train with `--motion --cv`** (serial path, `--threads=1`): motion
 features give the model the trajectory signal, and the constant-velocity anchor
-lets it start at CLIPER and learn only the curvature — held-out ΔR ~40.5 km at
+lets it start at CLIPER and learn only the curvature — held-out ΔR ~40.8 km at
 6h, and it beats constant-velocity at 48h (see
 [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11). When you need multicore
 (`--threads=N`), use `--motion --delta` instead (~48 km): the displacement head
@@ -274,11 +274,11 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 
 | model | held-out test ΔR | vs persistence |
 |:--|:--:|:--:|
-| default (intensity + text) | 128.5 ± 41.3 km | ~parity |
-| **`--motion`** (feed position + velocity) | 79.0 ± 26.8 km | beats it |
-| **`--motion --delta`** (predict displacement) | 48.1 ± 2.7 km | 2.5× better |
-| `--motion --delta --no_text` (numbers only) | 46.5 ± 3.9 km | 2.6× better |
-| **`--motion --cv`** (constant-velocity decoder) | **40.5 km** | **reaches CLIPER (~39 km)** |
+| default (intensity + text) | 131.1 ± 39.6 km | ~parity |
+| **`--motion`** (feed position + velocity) | 76.2 ± 30.6 km | beats it |
+| **`--motion --delta`** (predict displacement) | 48.4 ± 2.6 km | 2.5× better |
+| `--motion --delta --no_text` (numbers only) | 46.7 ± 4.8 km | 2.6× better |
+| **`--motion --cv`** (constant-velocity decoder) | **40.8 km** | **reaches CLIPER (~39 km)** |
 
 `--cv` anchors the decoder at constant-velocity extrapolation and learns only the
 curvature — the first architectural change that reaches the constant-velocity
@@ -292,8 +292,8 @@ split noise (see [FINDINGS §10–§11](docs/FINDINGS.md)).
 The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
 default model was **blind to motion** (its inputs are intensity + text; position
 and velocity were never fed in), so it lost to a two-line physics baseline.
-Feeding motion and predicting displacement takes held-out ΔR from **128 km → 48
-km**; anchoring the decoder at constant-velocity (`--cv`) reaches **40.5 km** —
+Feeding motion and predicting displacement takes held-out ΔR from **131 km → 48
+km**; anchoring the decoder at constant-velocity (`--cv`) reaches **40.8 km** —
 matching CLIPER at 6h and **beating it at 48h on 4 of 5 splits**. And the
 **language branch still doesn't help** even with a working model
 (numbers-only is marginally *better*), a robust negative result on this data.
