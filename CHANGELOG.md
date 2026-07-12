@@ -4,6 +4,9 @@ Notable changes to this repository, per [Keep a Changelog](https://keepachangelo
 
 ## [Unreleased]
 
+### Added
+- Data-parallel (`--threads=N`) training support for the previously serial-only paths: `--cv`, `--gru`, `--xattn`, and `--co_spatial`. The workers now feed the same per-sample auxiliary inputs as the serial loop (seed velocity for the cv-anchored decoders, co-active neighbour tables for co-spatial attention) — the replicas were already built with the right architecture, the aux plumbing was the missing piece. `tests/test_parallel` gained a variant phase that pins serial/parallel gradient equivalence for each of the four on the real dataset (~1e-8); end-to-end multicore training reproduces the serial held-out results within dropout-stream noise (cv seed 5: 38.4 vs 37.8 km). `--km_loss` remains serial-only.
+
 ### Changed
 - `mat_matmul_bt` (the forward-pass workhorse behind every `linear_forward`) now splits its dot products across 8 independent accumulators, breaking the loop-carried float-addition dependency chain so the compiler can pipeline and SLP-vectorize the reduction at plain `-O3`. Full-config forward: 60.3 → 10.8 ms/sample (5.6×); forward+backward: 84.0 → 39.6 ms/sample (2.1×) on the portable build. Summation order changed, so `test_golden`'s pinned loss was updated (0.02706 → 0.02700) per the documented procedure.
 - `partrainer_broadcast` copies each parameter tensor with one `memcpy` instead of an element-wise loop (runs over all params × replicas every minibatch).

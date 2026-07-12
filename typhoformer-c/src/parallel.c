@@ -20,6 +20,7 @@ typedef struct {
     ParamList pl;
     /* per-worker scratch (no sharing between threads) */
     Mat xn, xt, yp, Y, dpred, dgate;
+    Mat nbr, vel;   /* per-sample aux inputs: co-active neighbours, seed velocity */
     /* per-batch job description */
     const Dataset *ds;
     const int     *idx;
@@ -68,6 +69,8 @@ ParTrainer *partrainer_new(const Config *cfg, int n_workers) {
         w->Y     = mat_new(c->pred_len, 2);
         w->dpred = mat_new(c->pred_len, c->out_dim);
         w->dgate = mat_new(c->in_len, c->d_model);
+        w->nbr   = mat_new(TF_NBR_K, TF_NBR_NF);
+        w->vel   = mat_new(1, 2);
         /* Seed = FNV-prime * (i+1) + 1: a cheap way to give each worker a
          * well-separated, nonzero starting dropout state. */
         w->dseed = 0x100000001b3UL * (unsigned long)(i + 1) + 1;   /* distinct per worker */
@@ -81,6 +84,7 @@ void partrainer_free(ParTrainer *pt) {
         Worker *w = &pt->w[i];
         mat_free(&w->xn); mat_free(&w->xt); mat_free(&w->yp); mat_free(&w->Y);
         mat_free(&w->dpred); mat_free(&w->dgate);
+        mat_free(&w->nbr); mat_free(&w->vel);
         model_free(&w->model);
         plist_free(&w->pl);
     }
@@ -132,6 +136,16 @@ static void *worker_run(void *arg) {
     for (int k = 0; k < w->count; ++k) {
         int s = w->idx[w->start + k];                       /* shuffled sample index */
         dataset_get(w->ds, s, w->xn, w->xt, w->yp, w->Y);
+        /* Per-sample auxiliary inputs, mirroring the serial loop and evaluate():
+         * co-active neighbours (used only when the model was built --co_spatial)
+         * and the seed velocity (used only by the cv/gru/xattn decoders). Both
+         * are cheap copies and no-ops for model heads that ignore them, and both
+         * read only immutable per-record dataset tables — race-free. This is
+         * what makes --cv/--gru/--xattn/--co_spatial work with --threads>1. */
+        int nc; dataset_neighbors(w->ds, s, w->nbr, &nc);
+        model_set_neighbors(&w->model, w->nbr, nc);
+        dataset_seed_velocity(w->ds, s, w->vel);
+        model_set_seed_velocity(&w->model, w->vel);
         model_forward(&w->model, w->xn, w->xt, w->yp);
         /* raw (un-averaged) gradients; the 1/bs scale is applied at reduction */
         w->loss += model_loss(w->model.pred, w->Y, w->model.pgf.gate, w->lambda,

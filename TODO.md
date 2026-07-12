@@ -11,7 +11,7 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 
 ## Engineering
 
-- [ ] **Multicore support for the serial-only paths.** `--cv`, `--gru`, `--xattn`, and `--co_spatial` require `--threads=1`; extend `parallel.c` replica setup to cover the decoder variants and co-active spatial attention.
+- [x] **Multicore support for the serial-only paths.** Done — the data-parallel workers now feed the per-sample aux inputs (seed velocity, co-active neighbours), so `--cv`/`--gru`/`--xattn`/`--co_spatial` all train with `--threads=N`; `test_parallel` pins serial/parallel gradient equivalence for each variant on the real dataset. Only `--km_loss` remains serial-only.
 - [ ] **Run-verify the CUDA backend on a real GPU.** It compiles with `nvcc` (CI compile-checks it) but, unlike OpenCL (verified end-to-end via POCL), has never been executed against the kernel cross-check and gradient tests.
 - [ ] **Build and test on Windows.** The data loader has a `FindFirstFile` branch written but only the POSIX (`scandir`) branch has ever been compiled.
 - [ ] **Extend the unrolled-reduction treatment to the attention kernels.** `mat_matmul_bt` got the 8-accumulator dot product (5.6× forward); the MHA per-head score/context loops and the xattn step loops still use single-accumulator reductions. Small share of runtime at `in_len=12`, but worth it for long input windows.

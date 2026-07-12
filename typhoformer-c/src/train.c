@@ -171,10 +171,12 @@ static int cmd_train(int argc, char **argv) {
     int no_text = 0;                  /* ablation: zero out the text-embedding stream (numbers-only model) */
     int motion = 0;                   /* feature aug: append (lat,lon,dlat,dlon) to numeric inputs — CHANGES d_num */
     int delta = 0;                    /* decoder predicts displacement from the seed instead of absolute coords */
-    /* --- decoder variants (SERIAL-path only; see notes further down) ---
+    /* --- decoder variants ---
      * These change the parameter set, so they must be set before model_new AND
      * matched at eval time. cv/gru/xattn all anchor the forecast at a constant-
-     * velocity extrapolation and learn a curvature correction on top. */
+     * velocity extrapolation and learn a curvature correction on top. All work
+     * on both the serial and the data-parallel (--threads=N) paths: the workers
+     * feed the same per-sample aux inputs (seed velocity, neighbours). */
     int cv = 0;                       /* constant-velocity anchor + learned curvature (2nd-order motion model) */
     int gru = 0;                      /* cv + a recurrent GRU memory over horizons (implies cv) */
     int xattn = 0;                    /* cv + decoder cross-attention over the encoder sequence (implies cv) */
@@ -224,7 +226,7 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--pool=last"))      pool_last = 1;    /* pool the last token instead of mean */
         else if (!strcmp(argv[i], "--prenorm"))        prenorm = 1;      /* pre-LN transformer block ordering */
         else if (!strcmp(argv[i], "--timebias"))       timebias = 1;     /* learned relative-time attention bias */
-        else if (!strcmp(argv[i], "--co_spatial"))     co_spatial = 1;   /* feed co-active storm neighbours (serial only) */
+        else if (!strcmp(argv[i], "--co_spatial"))     co_spatial = 1;   /* feed co-active storm neighbours */
         else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);  /* storm split RNG */
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);           /* weight/dropout RNG */
@@ -287,10 +289,6 @@ static int cmd_train(int argc, char **argv) {
     else if (delta) model_set_delta(1);
     model_set_no_spatial(no_spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
     nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
-    /* Like --km_loss, the neighbour feed and cv seed-velocity are wired only in
-     * the serial inner loop, so they are inert on the multi-threaded path. */
-    if (co_spatial && threads > 1) printf("note: --co_spatial applies on the serial path; use --threads=1\n");
-    if (cv && threads > 1) printf("note: --cv applies on the serial path; use --threads=1\n");
     ParamList pl; plist_init(&pl);                   /* flat registry of all trainable tensors + their grads */
     Model m = model_new(&c, &pl);                    /* build the model, registering its params into `pl` */
     Adam opt = adam_new(&pl, lr, wd);                /* AdamW state (m,v moments) sized to `pl` */
@@ -346,8 +344,9 @@ static int cmd_train(int argc, char **argv) {
             if (pt) {                                /* data-parallel across cores */
                 /* Push the current master weights to every replica, then have
                  * the workers forward+backward their shard and reduce gradients
-                 * back into the master `pl`. The workers do NOT run the serial-
-                 * only extras (co_spatial / cv seed-velocity / km_loss). */
+                 * back into the master `pl`. Workers feed the same per-sample
+                 * aux inputs as the serial loop (neighbours, seed velocity);
+                 * only --km_loss remains serial-only. */
                 partrainer_broadcast(pt, &pl);       /* replicas <- master weights */
                 run_loss += partrainer_step_grads(pt, &pl, &ds, train, b, bs, lambda);
             } else {                                 /* serial */
