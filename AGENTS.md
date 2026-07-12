@@ -11,6 +11,12 @@ TyphoFormer: a language-augmented Transformer for typhoon/hurricane track foreca
 
 Shared data at the repo root: `HURDAT_2new_3000.csv` (raw records, 2020–2024), `embedding_chunks/*.npy` (precomputed MiniLM embeddings of GPT-4o descriptions), `data/{train,val,test}/` (pickled `.npy` window samples). The C data loader reads the CSV and embedding chunks from the repo root via `../`, so build and run from inside `typhoformer-c/`.
 
+## Task tracking & changelog
+
+- **`TODO.md`** is the task list for new/pending work. When starting a task that matches an item, work from it; check the item off (`- [x]`) when it's done and delete stale entries. Add newly discovered follow-up work as new items.
+- **`CHANGELOG.md`** follows Keep a Changelog: record every notable codebase change under `[Unreleased]` (categories: Added / Changed / Fixed / Docs) as part of the same commit or PR that makes the change.
+- Experimental results — including negative ones — go in `typhoformer-c/docs/FINDINGS.md`, not the changelog.
+
 ## Commands (typhoformer-c/)
 
 All from `typhoformer-c/`:

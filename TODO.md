@@ -18,4 +18,4 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 
 ## Conventions for this file
 
-Check items off (or delete them) as they land, and move the outcome to `CHANGELOG.md`. For research items, FINDINGS.md is the record of results — including negative ones.
+Check items off (`- [x]`) as they land, and record the outcome under `[Unreleased]` in `CHANGELOG.md`. Add new pending tasks here as they come up. For research items, FINDINGS.md is the record of results — including negative ones.

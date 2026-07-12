@@ -1,6 +1,11 @@
 # Changelog
 
-Notable changes to this repository. The project has no versioned releases yet, so entries are grouped by date, newest first. The format loosely follows [Keep a Changelog](https://keepachangelog.com/); categories are **Added / Changed / Fixed / Docs**.
+Notable changes to this repository, per [Keep a Changelog](https://keepachangelog.com/): new work goes under **[Unreleased]** as it lands, using the categories **Added / Changed / Fixed / Docs**. The project has no versioned releases yet, so the history below is grouped by date, newest first.
+
+## [Unreleased]
+
+### Added
+- Nothing yet.
 
 ## 2026-07-12
 
