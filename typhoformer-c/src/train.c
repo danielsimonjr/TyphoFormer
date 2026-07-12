@@ -585,7 +585,7 @@ static void apply_ckpt_stats(Dataset *ds, const char *weights) {
  * flag to trigger neighbour precomputation on the dataset. */
 static int cmd_eval(int argc, char **argv) {
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *weights = DEF_CKPT;
-    int no_text = 0, co_spatial = 0, threads = 1;
+    int no_text = 0, co_spatial = 0, threads = 1, no_lon = 0;
     /* Optional split-restricted scoring: --split_seed=S --split=test re-derives
      * the storm-level partition a checkpoint was trained with (same S => same
      * deterministic split) and scores ONLY that subset — the honest way to
@@ -603,6 +603,7 @@ static int cmd_eval(int argc, char **argv) {
         else if (!strcmp(argv[i], "--split=val"))    split_which = 1;
         else if (!strcmp(argv[i], "--split=train"))  split_which = 0;
         else if (!strcmp(argv[i], "--no_text"))       no_text = 1;
+        else if (!strcmp(argv[i], "--no_lon"))        no_lon = 1;   /* must match a --no_lon checkpoint */
         /* Structural flags — MUST match the checkpoint's training flags: */
         else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
         else if (!strcmp(argv[i], "--cv"))            model_set_cv(1);
@@ -638,6 +639,12 @@ static int cmd_eval(int argc, char **argv) {
 
     ds.no_text |= no_text;                           /* --emb=none already set it */
     apply_feature_aug(&ds, c.d_num);                /* re-apply the ckpt's --motion/--physics (width arithmetic) */
+    /* --no_lon checkpoints trained with the absolute-longitude column zeroed;
+     * reproduce that here (same column arithmetic as cmd_train). */
+    if (no_lon && !ds.prewindowed && c.d_num > 14) {
+        int lon_col = ds.d_num - ((c.d_num - 14 == 11) ? 10 : 3);
+        for (int i = 0; i < ds.n_records; ++i) ds.num[(size_t)i * ds.d_num + lon_col] = 0.0f;
+    }
     if (co_spatial) dataset_build_neighbors(&ds);
     apply_ckpt_stats(&ds, wlist[0]);                 /* reuse the checkpoint's train-only normalization */
     ParamList pls[MAX_ENS]; Model msv[MAX_ENS]; Model *mps[MAX_ENS];
