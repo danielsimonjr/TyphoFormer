@@ -365,7 +365,48 @@ constant-velocity **anchor plus a simple learned correction** is the winning
 recipe at every horizon; adding recurrent memory or cross-attention on top only
 adds variance on this much data.
 
-## 12. What this means
+## 12. Data-parallel training is variant-complete — and a cautionary tale
+
+Multicore training (`--threads=N`) originally covered only the plain and delta
+decoders: the workers never fed the per-sample auxiliary inputs — the seed
+velocity the cv/gru/xattn decoders consume, and the co-active neighbour tables
+`--co_spatial` consumes — so those flags were documented serial-only. That gap
+is now closed: the workers feed both inputs exactly as the serial loop does,
+and `tests/test_parallel` pins serial/parallel **gradient equivalence per
+variant on the real dataset** (max abs diff ≤ 3e-8; batch loss identical to
+~1e-16).
+
+End-to-end, the parallel path reproduces the serial results. Held-out test ΔR
+(km), `--motion`, 30 epochs, `--patience=8`:
+
+| config | serial | `--threads=4` |
+|:--|:--:|:--:|
+| `--cv`, seed 1 | 43.4 | 42.4 |
+| `--cv`, seed 3 | 41.1 | 41.4 |
+| `--cv`, seed 5 | 37.8 | 38.4 |
+| `--gru`, seed 5 | 39.1 | 40.0 |
+| `--xattn`, seed 5 | 37.2 | 37.9 |
+| **`--cv` 3-seed mean** | **40.8** | **40.7** |
+
+Parallel runs are not bit-identical to serial — each worker draws its own
+dropout mask stream, and gradient reduction reorders float sums — but every
+config lands within ±1 km of its serial counterpart, far inside the split
+noise, and the cv 3-seed means agree to 0.1 km.
+
+**The cautionary tale.** The pre-fix code did not *refuse*
+`--cv --threads=4` — it printed a note and trained anyway, with the workers
+silently feeding **zero seed velocity**. Such a run looks perfectly healthy on
+the training loss (it falls exactly like a good run), because the model
+consistently learns curvature corrections for a zero-velocity anchor. But eval
+feeds the *real* seed velocity, the learned pseudo-velocity double-counts it,
+and the held-out result collapses: **105.8 km vs 37.8 serial** — worse than
+doing nothing. Two things caught it instantly: the **epoch-0 anchor check**
+(an untrained cv model must score exactly CLIPER on val) and **held-out
+evaluation**. The lesson generalizes: a train/eval *input* mismatch is
+invisible in the loss curve — validate plumbing changes on val/test metrics,
+never on training loss.
+
+## 13. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
@@ -404,6 +445,11 @@ adds variance on this much data.
   variance at this data scale.
 
 ## Reproduce
+
+The commands below record the exact protocol used for the numbers above
+(`--threads=1` throughout). The cv/gru/xattn/co_spatial paths now also train
+data-parallel — add `--threads=N` for a faster, statistically equivalent run
+(different dropout streams and summation order, same distribution).
 
 ```sh
 # the fix, across splits

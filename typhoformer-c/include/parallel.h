@@ -10,6 +10,13 @@
  * ParamList and the optimizer takes a single step. This is textbook synchronous
  * data-parallel SGD.
  *
+ * Workers feed every per-sample auxiliary input the serial loop feeds — the
+ * seed velocity (consumed by the --cv/--gru/--xattn decoders) and the co-active
+ * neighbour tables (consumed by --co_spatial) — so all decoder variants and the
+ * co-spatial branch train data-parallel. Replicas are constructed from the same
+ * architecture globals as the master (set the model_set_* flags BEFORE
+ * partrainer_new). The one serial-only training flag left is --km_loss.
+ *
  * Numerical note: the reduced gradient equals the serial gradient up to
  * floating-point summation order (the batch is summed in a different order), so
  * results match to ~1e-5 relative, not bit-for-bit. tests/test_parallel.c

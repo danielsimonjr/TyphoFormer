@@ -171,7 +171,7 @@ general `.npy` reader.
 | `make NATIVE=1` | `-march=native` SIMD; ~2× on the full config. Non-portable binary. |
 | `Config` size (`d_model`, `d_ff`, `n_layers`) | Dominates compute. The compact demo (`d_model=64`) is ~60× cheaper than the full paper config. |
 | Batch | Inference is per-sample; batch by looping. Throughput scales ~linearly with cores if you shard across instances. |
-| `--threads=N` (training) | Data-parallel SGD across cores via `ParTrainer` ([parallel.h](../include/parallel.h)); near-linear scaling to the core count, gradient-equivalent to serial. |
+| `--threads=N` (training) | Data-parallel SGD across cores via `ParTrainer` ([parallel.h](../include/parallel.h)); near-linear scaling to the core count, gradient-equivalent to serial — including the cv/gru/xattn decoder variants and `--co_spatial`. |
 | Backend | Every layer is built from the ~13 kernels in [backend.h](../include/backend.h). Swap `src/tensor.c` for a SIMD/GPU backend (CUDA reference in [backends/](../backends/)) to move compute off the CPU. |
 
 Each `model_forward` is hand-written, cache-aware (`ikj`/`pij` loop orders,

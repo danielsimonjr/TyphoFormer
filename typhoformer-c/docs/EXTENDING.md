@@ -161,8 +161,11 @@ unchanged against your backend — as they do for OpenCL.
 ### 6c. Multicore training — the data-parallel seam
 [`include/parallel.h`](../include/parallel.h) / `src/parallel.c` replicate the
 model across threads, broadcast weights, and reduce gradients for one optimizer
-step (`--threads=N`). **Acceptance:** `tests/test_parallel` shows the reduced
-gradient equals the serial gradient to ≈1e-7, and ThreadSanitizer is clean.
+step (`--threads=N`). Workers also feed the per-sample aux inputs (seed
+velocity, co-active neighbours), so the cv/gru/xattn decoders and
+`--co_spatial` train data-parallel too. **Acceptance:** `tests/test_parallel`
+shows the reduced gradient equals the serial gradient to ≈1e-7 — including a
+variant phase covering cv/gru/xattn/co_spatial — and ThreadSanitizer is clean.
 
 ---
 
