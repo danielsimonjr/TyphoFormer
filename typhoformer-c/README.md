@@ -73,7 +73,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | Command | Purpose | Example |
 |:--|:--|:--|
 | `train`    | Train; writes a checkpoint (config header + normalization stats). | `./typhoformer train 30 --full --save=m.ckpt` |
-| `eval`     | Load a checkpoint and evaluate (MAE + spherical-distance ΔR, per horizon). | `./typhoformer eval --weights=m.ckpt` |
+| `eval`     | Load a checkpoint — or a comma-separated **ensemble**, predictions averaged — and evaluate (MAE + spherical ΔR, per horizon). `--split=test --split_seed=S` re-derives the training partition and scores only the held-out storms; `--threads=N` shards eval across cores. | `./typhoformer eval --weights=a.ckpt,b.ckpt --split=test --split_seed=5` |
 | `prepare`  | Build sliding-window samples from CSV + embeddings and write a `.tfb`. | `./typhoformer prepare --out=data.tfb` |
 | `predict`  | Write predicted vs. true tracks (with per-step error) to CSV. | `./typhoformer predict --weights=m.ckpt --n=50 --out=pred.csv` |
 | `baseline` | Report persistence and constant-velocity (CLIPER-style) baselines. | `./typhoformer baseline --pred_len=4` |
@@ -97,12 +97,15 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
+| `--physics` | **Second-order physics features**: acceleration (Δ²lat, Δ²lon), translation speed, heading unit vector, and seasonal day-of-year phase (sin/cos). Composes with `--motion` (+7 features). | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
 | `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Supersedes `--delta`. | off |
 | `--gru` | Constant-velocity decoder whose curvature correction is produced by a **GRU** with hidden state carried across the rollout (initialised from the encoder context) — gives the multi-step rollout real memory. | off |
 | `--xattn` | Constant-velocity decoder whose per-step context comes from **cross-attention over the encoder's full sequence** (not the pooled vector). | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
-| `--no_spatial` | Drop the degenerate N=1 spatial encoder blocks (their Q/K never train). | off |
+| `--huber=` | **Huber loss** with transition point δ on the normalized residual (quadratic core = MSE, linear tails) — tempers fast-moving outlier storms. 0 = plain MSE. | 0 |
+| `--hweight=` | **Horizon-weighted loss**: forecast step h weighted `(h+1)^γ` (mean-normalized) — γ>0 upweights the long horizons that dominate the km error. 0 = uniform. | 0 |
+| `--spatial` | Restore the paper's N=1 spatial encoder blocks. They are **off by default** (their Q/K never train and dropping them is accuracy-neutral — FINDINGS §7 — for ~2× less encoder compute); required to load checkpoints trained before the default changed. `--no_spatial` is accepted as a no-op. | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
 | `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |
 | `--prenorm` | Pre-norm transformer blocks (LN before each sublayer) instead of post-norm. | off |
@@ -113,13 +116,16 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
 
-**For accuracy, train with `--motion --cv`**: motion features give the model the
-trajectory signal, and the constant-velocity anchor lets it start at CLIPER and
-learn only the curvature — held-out ΔR ~40.8 km at 6h, and it beats
-constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11). All
-decoder variants work on both the serial and the data-parallel (`--threads=N`)
-paths. `eval`/`predict` auto-detect `--motion` from the checkpoint's feature
-count; pass `--delta`/`--cv` to `eval` to match the checkpoint's decoder.
+**For accuracy, train with `--motion --physics --cv`**: motion features give the
+model the trajectory signal, the physics features add the curvature signal
+(heading, acceleration, seasonal phase — better on all five test splits), and
+the constant-velocity anchor lets it start at CLIPER and learn only the
+correction — held-out ΔR ~39.1 km at 6h, and the cv decoder beats
+constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13).
+All decoder variants work on both the serial and the data-parallel
+(`--threads=N`) paths. `eval`/`predict` auto-detect `--motion`/`--physics` from
+the checkpoint's feature count; pass `--delta`/`--cv` to `eval` to match the
+checkpoint's decoder.
 
 `--no_text` is the key scientific control: it tests whether the GPT-4o/MiniLM
 language branch — the paper's central premise — actually helps versus a
@@ -199,17 +205,20 @@ forward pass 5.6× faster. Backward passes reuse persistent per-module scratch
 buffers, so training does no per-step heap allocation.
 
 Measured on a 4-core container, single-threaded (epoch = 1097 train samples +
-per-epoch validation; your hardware will vary — rerun `bench` to check):
+per-epoch validation; your hardware will vary — rerun `bench` to check). The
+default encoder now skips the dead N=1 spatial blocks (full config 2.77 M
+params; `--spatial` restores the paper's 5.14 M — bench it with
+`bench --full --spatial`):
 
-| Build | Compact config | Full paper config (5.1 M params) |
+| Build | Compact config | Full config (2.77 M params) |
 |:--|:--:|:--:|
-| `make` (portable `-O3`) | ~1.2 s/epoch | ~40 s/epoch |
-| `make NATIVE=1` (`-march=native`) | ~1.2 s/epoch | **~31 s/epoch** |
+| `make` (portable `-O3`) | ~1 s/epoch | ~23 s/epoch |
+| `make NATIVE=1` (`-march=native`) | ~1 s/epoch | **~18 s/epoch** |
 
-(`bench`, full config: portable 10.8 ms forward / 39.6 ms forward+backward per
-sample; NATIVE 6.1 / 20.9 ms.) Native SIMD adds another ~25% on the full
-config; `--threads=N` adds data-parallel scaling across cores on top (see
-**Multicore training** above).
+(`bench`, full config: portable 4.1 ms forward / 14.5 ms forward+backward per
+sample; NATIVE 3.3 / 10.9 ms. For a portable AVX2 binary between the two, use
+`make MARCH=x86-64-v3`.) `--threads=N` adds data-parallel scaling across cores
+on top (see **Multicore training** above).
 For a GPU or other accelerator, implement the ~13-kernel contract in
 [`include/backend.h`](include/backend.h): [`backends/opencl/`](backends/opencl/)
 is a **runnable** OpenCL backend (`make OPENCL=1 test-opencl` verifies the whole
@@ -228,6 +237,7 @@ See [`backends/README.md`](backends/README.md).
 | `make test-valgrind` | Run the whole test suite under **valgrind** (memcheck + leak-check). |
 | `make OPENCL=1 test-opencl` | Build the model on the **OpenCL** backend and verify it (kernels vs CPU + full-model gradient check). Needs an OpenCL ICD (`pocl-opencl-icd` for CPU). |
 | `make NATIVE=1` | Build with `-march=native -funroll-loops` (faster, non-portable binary). |
+| `make MARCH=x86-64-v3` | Portable SIMD tier between plain `-O3` and NATIVE (AVX2+FMA; runs on any x86-64 CPU from ~2015 on). |
 | `make -C backends/cuda` | Compile the **CUDA** backend with `nvcc` → `libtyphoformer_cuda.a`. |
 | `make clean` | Remove build artifacts. |
 
@@ -283,6 +293,7 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 | **`--motion --delta`** (predict displacement) | 48.4 ± 2.6 km | 2.5× better |
 | `--motion --delta --no_text` (numbers only) | 46.7 ± 4.8 km | 2.6× better |
 | **`--motion --cv`** (constant-velocity decoder) | **40.8 km** | **reaches CLIPER (~39 km)** |
+| **`--motion --physics --cv`** (+ heading/accel/season; no-spatial default) | **39.1 km** | **on CLIPER; better on 5/5 splits** |
 
 `--cv` anchors the decoder at constant-velocity extrapolation and learns only the
 curvature — the first architectural change that reaches the constant-velocity

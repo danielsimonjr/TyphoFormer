@@ -94,6 +94,8 @@ void partrainer_free(ParTrainer *pt) {
 
 int partrainer_workers(const ParTrainer *pt) { return pt->n; }
 
+Model *partrainer_model(ParTrainer *pt, int i) { return &pt->w[i].model; }
+
 /* Broadcast: overwrite every replica's parameter VALUES with the master's. This
  * must be called before each step so all replicas compute gradients at the exact
  * same weights the optimizer is about to update — the defining property of

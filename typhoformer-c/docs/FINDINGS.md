@@ -12,6 +12,11 @@ more than "is it well-built." These are the honest results on the bundled
 > (see §11's sensitivity control). **Every qualitative conclusion survived**;
 > individual numbers moved by a few km, exactly the float-level sensitivity §11
 > quantifies. §10 is kept unchanged as the historical pre-vectorization record.
+>
+> **Encoder default change (post-§12):** the degenerate N=1 spatial blocks are
+> now skipped by default (motivated by §7). §1–§12 were measured with those
+> blocks present — pass `--spatial` to reproduce them exactly. §13's fresh
+> baselines cover the new default (which is ~1 km *better* at 6h).
 
 ## 1. The single-split headline is not trustworthy
 
@@ -406,7 +411,70 @@ evaluation**. The lesson generalizes: a train/eval *input* mismatch is
 invisible in the loss curve — validate plumbing changes on val/test metrics,
 never on training loss.
 
-## 13. What this means
+## 13. Second-round levers: physics features, robust loss, seed ensembles
+
+Three follow-ups from the optimization review, each tested with the standard
+protocol (30 epochs, `--patience=8`, five split seeds unless noted). All §13
+runs use the **new no-spatial default encoder** (§7 measured the paper's N=1
+spatial blocks as accuracy-neutral dead weight, so the default now skips them;
+`--spatial` restores the old architecture — and is required to reproduce
+§1–§12's numbers exactly).
+
+**Fresh cv baseline under the new default (6h):** 41.6 / 38.3 / 41.0 / 39.5 /
+37.6 → **mean 39.6 km** — about 1 km under the spatial-default baseline (40.8,
+§9) and statistically *on* the 39.4 km CLIPER bar. Dropping the dead blocks
+cost nothing and may have helped slightly.
+
+**`--physics` (acceleration, speed, heading, seasonal phase) — small but
+sign-consistent.** Held-out test ΔR at 6h, `--motion [--physics] --cv`:
+
+| seed | 1 | 2 | 3 | 4 | 5 | mean |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|
+| baseline | 41.60 | 38.34 | 40.95 | 39.49 | 37.56 | 39.59 |
+| `--physics` | 40.28 | 38.15 | 40.49 | 39.45 | 37.13 | **39.10** |
+
+Physics wins on **all five splits** (−1.32 to −0.04 km, mean −0.49 km, ~1.2%).
+The magnitude is inside single-split noise, but a 5/5 sign pattern is not —
+this is the first *feature* addition since `--motion` that helps at all, and it
+helps in exactly the physically-motivated way (heading and acceleration are the
+curvature signal). Honest label: suggestive-to-real; more storms decide.
+
+**Loss shaping at 48h (`--pred_len=8`, 6–48h mean ΔR):**
+
+| loss | s1 | s2 | s3 | s4 | s5 | mean ± std |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|
+| MSE (baseline) | 300.1 | 348.2 | 303.8 | 259.9 | 261.4 | 294.7 ± 36 |
+| `--huber=0.1` | 303.1 | 272.3 | 269.7 | 282.9 | 274.7 | **280.5 ± 14** |
+| `--hweight=1` | 304.7 | 327.7 | 301.7 | 248.0 | 265.4 | 289.5 ± 33 |
+
+`--huber` wins the mean (−14 km, −4.8%) but only 2 of 5 seeds — its real effect
+is the **variance collapse (±36 → ±14)**: the catastrophic splits vanish (worst
+348 → 303). This is the `--delta` lesson (§5) again, in the objective this
+time: on 98 storms, robustness mechanisms pay by taming tails, not by shifting
+means. `--hweight` is neutral within noise — upweighting far horizons does not
+help when the far-horizon errors are already what dominates the gradient.
+
+**Seed ensembles (3 members per split, `--seed=101/102/103`, scored on the
+held-out test storms via `eval --weights=a,b,c --split=test`):**
+
+| split | member 1 | member 2 | member 3 | ensemble |
+|:--|:--:|:--:|:--:|:--:|
+| 1 | 43.17 | 42.75 | 42.09 | **42.16** |
+| 3 | 41.30 | 40.68 | 40.99 | **40.83** |
+| 5 | 37.99 | 39.91 | 37.82 | **37.98** |
+
+The ensemble lands at ~the best member on every split without knowing which
+member is best — worth ~0.5 km (~1.2%) over the *expected* single model. The
+gain is smaller than typical deep-ensemble lore because cv members are highly
+correlated: they share the constant-velocity anchor and learn similar small
+corrections. Cheap insurance, not a lever.
+
+**Takeaway.** All three behave exactly as the small-data hypothesis predicts:
+physically-motivated inputs give a small consistent win, robustness mechanisms
+collapse variance, averaging buys insurance — and nothing moves the number a
+lot, because the ceiling is still 98 storms.
+
+## 14. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
@@ -433,6 +501,14 @@ never on training loss.
   zero-init residual) a real training divergence that a single-split run would have
   hidden. The levers that moved the 6h number were all about the physics the model
   sees — motion features, a displacement head, a constant-velocity anchor.
+- **The second round of levers behaved exactly as small-data theory predicts**
+  (§13). Physics features (heading, acceleration, seasonal phase) give a small
+  win that is **sign-consistent across all five splits** — the first feature
+  addition since `--motion` that helps at all. A Huber loss collapses the 48h
+  split variance (±36 → ±14 km) without reliably shifting the mean; horizon
+  weighting is neutral; 3-seed ensembles recover ~best-member skill (~1%
+  insurance). Inputs and robustness keep paying small dividends; capacity and
+  machinery still pay nothing.
 - **Decoder *memory* did not survive the re-test** (§10 → §11). On three splits,
   `--gru`/`--xattn` looked like the first network change that helps at long
   horizons. On **five** splits, at both 24h and 48h, the effect is gone: both
@@ -473,6 +549,15 @@ done; ./typhoformer train 0 --motion --cv --threads=1 --pred_len=$P --split_seed
 ./typhoformer train 30 --patience=8 --motion --delta --no_spatial          # encoder sweep
 ./typhoformer train 30 --patience=8 --motion --delta --timebias            # temporal distance bias
 ./typhoformer train 30 --patience=8 --motion --delta --co_spatial --threads=1  # real spatial attn
+# second-round levers (§13) — note: §1-§12 predate the no-spatial default; add
+# --spatial to those commands to reproduce their numbers exactly
+for s in 1 2 3 4 5; do
+  ./typhoformer train 30 --patience=8 --motion --physics --cv --split_seed=$s   # physics features
+  ./typhoformer train 30 --patience=8 --motion --cv --pred_len=8 --huber=0.1 --split_seed=$s
+  ./typhoformer train 30 --patience=8 --motion --cv --pred_len=8 --hweight=1 --split_seed=$s
+done
+for sd in 101 102 103; do ./typhoformer train 30 --patience=8 --motion --cv --split_seed=5 --seed=$sd --save=m$sd.ckpt; done
+./typhoformer eval --weights=m101.ckpt,m102.ckpt,m103.ckpt --cv --split=test --split_seed=5   # ensemble
 ```
 
 (See [LABS.md](LABS.md) Track D for these as guided exercises.)

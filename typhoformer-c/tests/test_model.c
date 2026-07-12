@@ -113,19 +113,27 @@ int main(void) {
     fail |= check_model("xattn", 1);
     fail |= check_model("xattn+multistep", 3);
     model_set_xattn(0);
-    /* encoder architecture variants (each set, checked, reset) */
-    model_set_no_spatial(1); fail |= check_model("no_spatial", 1); model_set_no_spatial(0);
+    /* loss-shaping options: the FD check differentiates THROUGH model_loss, so
+     * this validates the Huber tails (small delta pushes most residuals into
+     * the linear branch) and the horizon weights on a multi-step rollout. */
+    model_set_huber(0.05f); model_set_hweight(1.0f);
+    fail |= check_model("huber+hweight", 3);
+    model_set_huber(0.0f); model_set_hweight(0.0f);
+    /* encoder architecture variants (each set, checked, reset).
+     * no-spatial is now the DEFAULT (covered by every check above); this
+     * exercises the paper-faithful spatial (self_only) path explicitly. */
+    model_set_no_spatial(0); fail |= check_model("spatial (paper)", 1); model_set_no_spatial(1);
     model_set_posenc(1);     fail |= check_model("posenc", 1);     model_set_posenc(0);
     model_set_pool_last(1);  fail |= check_model("pool_last", 1);  model_set_pool_last(0);
     nn_set_prenorm(1);       fail |= check_model("prenorm", 1);    nn_set_prenorm(0);
     nn_set_timebias(1);      fail |= check_model("timebias", 1);   nn_set_timebias(0);
     model_set_co_spatial(1); fail |= check_model("co_spatial", 1); model_set_co_spatial(0);
     model_set_co_spatial(1); fail |= check_model("co_spatial+multistep", 3); model_set_co_spatial(0);
-    /* everything on at once (multi-step) */
-    model_set_delta(1); model_set_no_spatial(1); model_set_posenc(1);
+    /* everything on at once (multi-step; spatial ON to combine both paths) */
+    model_set_delta(1); model_set_no_spatial(0); model_set_posenc(1);
     model_set_pool_last(1); nn_set_prenorm(1);
     fail |= check_model("all-options", 3);
-    model_set_delta(0); model_set_no_spatial(0); model_set_posenc(0);
+    model_set_delta(0); model_set_no_spatial(1); model_set_posenc(0);
     model_set_pool_last(0); nn_set_prenorm(0);
     if (!fail) printf("\nmodel gradient check passed\n");
     return fail;

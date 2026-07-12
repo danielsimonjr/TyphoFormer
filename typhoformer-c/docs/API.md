@@ -170,10 +170,13 @@ void  model_forward (Model *m, const Mat xnum, const Mat xtext, const Mat yprev)
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);
 void  model_free(Model *m);
 
-// L = MSE(pred,Y) + lambda·mean(relu(0.6−gate)²).
+// L = mean_i w_h·huber(pred−Y) + lambda·mean(relu(0.6−gate)²)   (== MSE + gate
+// penalty with the loss-shaping options at their defaults).
 // If dpred / dgate_pen are non-NULL Mats they receive the upstream gradients.
 double model_loss(const Mat pred, const Mat Y, const Mat gate, float lambda,
                   Mat dpred, Mat dgate_pen);
+void   model_set_huber(float delta);   // Huber transition point on the normalized residual (0 = MSE)
+void   model_set_hweight(float gamma); // horizon weight (h+1)^γ, mean-normalized (0 = uniform)
 ```
 After `model_forward`, read predictions from `m->pred` `[pred_len,2]` and the
 gate from `m->pgf.gate` `[T,d_model]`. The sub-modules (`PGF`, `Encoder`,
@@ -193,6 +196,7 @@ typedef struct { int n_records, d_num, d_text, in_len, pred_len;
 Dataset dataset_load    (const char *csv, const char *embdir, int in_len, int pred_len);
 Dataset dataset_load_bin(const char *path);                 // pre-windowed .tfb
 void    dataset_add_motion(Dataset *d);                     // +lat,lon,Δlat,Δlon (d_num 14→18)
+void    dataset_add_physics(Dataset *d);                    // +accel,speed,heading,seasonal phase (d_num +7)
 Split   dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed);
 void    dataset_standardize(Dataset *d);                    // train-only fit + apply
 void    dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y);
@@ -201,10 +205,11 @@ void    dataset_free(Dataset *d);
 float  *npy_load_2d(const char *path, int *rows, int *cols);  // malloc'd; caller frees
 ```
 `dataset_get` fills caller-allocated `Mat`s (`xnum[T, d_num]`, `xtext[T,384]`,
-`yprev[1,2]`, `Y[pred_len,2]`). `d_num` is 14 by default, or **18 after
-`dataset_add_motion`** — always size `xnum` from `d->d_num`, not a literal 14.
-Coordinates come back normalized; `dataset_denorm` converts to degrees. The
-leakage-safe pipeline is `dataset_load` → `dataset_add_motion` (optional) →
+`yprev[1,2]`, `Y[pred_len,2]`). `d_num` is 14 by default, 18 after
+`dataset_add_motion`, +7 more after `dataset_add_physics` — always size `xnum`
+from `d->d_num`, not a literal 14. Coordinates come back normalized;
+`dataset_denorm` converts to degrees. The leakage-safe pipeline is
+`dataset_load` → `dataset_add_motion`/`dataset_add_physics` (optional) →
 `dataset_split3` → `dataset_standardize`.
 
 ---

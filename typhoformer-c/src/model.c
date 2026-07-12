@@ -36,8 +36,13 @@ static int g_xattn = 0;
  * the encoder expose its pre-pool sequence. Off by default. */
 void model_set_xattn(int on) { g_xattn = on; }
 
-/* Encoder architecture options (read at encoder_new time). Off by default. */
-static int g_no_spatial = 0, g_posenc = 0, g_pool_last = 0, g_co_spatial = 0;
+/* Encoder architecture options (read at encoder_new time).
+ * g_no_spatial defaults ON: the paper's N=1 "spatial" blocks are degenerate
+ * (each position attends only to itself; their Q/K never train) and FINDINGS §7
+ * measured dropping them as accuracy-neutral — so the default encoder skips
+ * them for ~2× less encoder compute. `--spatial` restores the paper-faithful
+ * architecture (required to load checkpoints trained with spatial blocks). */
+static int g_no_spatial = 1, g_posenc = 0, g_pool_last = 0, g_co_spatial = 0;
 void model_set_no_spatial(int on) { g_no_spatial = on; }
 void model_set_posenc(int on)     { g_posenc = on; }
 void model_set_pool_last(int on)  { g_pool_last = on; }
@@ -695,28 +700,64 @@ void model_free(Model *m) {
     mat_free(&m->dxtilde); mat_free(&m->pred);
 }
 
-/* Loss = MSE(pred,Y) + lambda·mean( relu(0.6 - gate)^2 ).
- * The second term is the gate-collapse penalty: it activates only where a gate
- * channel drops below 0.6, pushing the fusion to keep listening to the numerical
- * stream instead of leaning entirely on text. Gradients (optional outputs):
- *   dpred[i]     = (2/No)·(pred - Y)
- *   dgate_pen[i] = lambda·(-2/Ng)·(0.6 - gate)   where 0.6 - gate > 0, else 0
+/* ---- loss-shaping options (both off by default; set before training) ----
+ * g_huber:   Huber transition point δ on the NORMALIZED residual. Inside |r|<=δ
+ *            the term is the usual r² ; outside it grows linearly as δ(2|r|−δ)
+ *            (value- and gradient-continuous at ±δ), so fast-moving outlier
+ *            storms stop dominating the objective. 0 = plain MSE.
+ * g_hweight: horizon-weight exponent γ. Forecast step h is weighted
+ *            w_h = (h+1)^γ, normalized so mean(w) = 1 (keeps the loss scale
+ *            comparable across γ). γ>0 upweights the far steps that dominate
+ *            the km error budget; 0 = uniform. */
+static float g_huber = 0.0f;
+static float g_hweight = 0.0f;
+void model_set_huber(float delta) { g_huber = delta; }
+void model_set_hweight(float g)   { g_hweight = g; }
+
+/* Loss = mean_i w(i)·huber(pred_i − Y_i) + lambda·mean( relu(0.6 - gate)^2 ).
+ * With both options off this reduces exactly to the original
+ * MSE(pred,Y) + gate-collapse penalty. The second term activates only where a
+ * gate channel drops below 0.6, pushing the fusion to keep listening to the
+ * numerical stream instead of leaning entirely on text. Gradients (optional
+ * outputs):
+ *   dpred[i]     = (w_h/No)·huber'(r_i)         huber'(r)=2r inside, 2δ·sign(r) outside
+ *   dgate_pen[i] = lambda·(-2/Ng)·(0.6 - gate)  where 0.6 - gate > 0, else 0
  * (the minus sign is d/dgate of (0.6 - gate)^2). dgate_pen feeds pgf_backward. */
 double model_loss(const Mat pred, const Mat Y, const Mat gate, float lambda,
                   Mat dpred, Mat dgate_pen) {
     const int No = pred.rows * pred.cols, Ng = gate.rows * gate.cols;
-    double mse = 0.0;
-    for (int i = 0; i < No; ++i) { double d = pred.data[i] - Y.data[i]; mse += d * d; }
-    mse /= (double)No;
+    const int H = pred.rows, C = pred.cols;
+    /* Per-horizon weights w_h = (h+1)^γ · H / Σ(k+1)^γ  (mean 1). Uniform 1
+     * when γ==0 so the default path is bit-identical to the original. */
+    double wsum = 0.0;
+    for (int h = 0; h < H; ++h) wsum += pow((double)(h + 1), (double)g_hweight);
+    const double wnorm = (double)H / wsum;
+    double err = 0.0;
+    for (int h = 0; h < H; ++h) {
+        const double w = (g_hweight != 0.0f) ? pow((double)(h + 1), (double)g_hweight) * wnorm : 1.0;
+        for (int j = 0; j < C; ++j) {
+            const int i = h * C + j;
+            double r = pred.data[i] - Y.data[i];
+            double term, grad;
+            if (g_huber > 0.0f && fabs(r) > (double)g_huber) {   /* linear tail */
+                term = (double)g_huber * (2.0 * fabs(r) - (double)g_huber);
+                grad = 2.0 * (double)g_huber * (r > 0 ? 1.0 : -1.0);
+            } else {                                             /* quadratic core (== MSE) */
+                term = r * r;
+                grad = 2.0 * r;
+            }
+            err += w * term;
+            if (dpred.data) dpred.data[i] = (float)(w * grad / (double)No);
+        }
+    }
+    err /= (double)No;
     double pen = 0.0;
     for (int i = 0; i < Ng; ++i) { float r = 0.6f - gate.data[i]; if (r > 0.0f) pen += (double)r * r; }
     pen /= (double)Ng;
-    if (dpred.data)
-        for (int i = 0; i < No; ++i) dpred.data[i] = 2.0f / No * (pred.data[i] - Y.data[i]);
     if (dgate_pen.data)
         for (int i = 0; i < Ng; ++i) {
             float r = 0.6f - gate.data[i];
             dgate_pen.data[i] = (r > 0.0f) ? (lambda * (-2.0f) / Ng * r) : 0.0f;
         }
-    return mse + (double)lambda * pen;
+    return err + (double)lambda * pen;
 }
