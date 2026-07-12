@@ -4,8 +4,12 @@ Notable changes to this repository, per [Keep a Changelog](https://keepachangelo
 
 ## [Unreleased]
 
-### Added
-- Nothing yet.
+### Changed
+- `mat_matmul_bt` (the forward-pass workhorse behind every `linear_forward`) now splits its dot products across 8 independent accumulators, breaking the loop-carried float-addition dependency chain so the compiler can pipeline and SLP-vectorize the reduction at plain `-O3`. Full-config forward: 60.3 → 10.8 ms/sample (5.6×); forward+backward: 84.0 → 39.6 ms/sample (2.1×) on the portable build. Summation order changed, so `test_golden`'s pinned loss was updated (0.02706 → 0.02700) per the documented procedure.
+- `partrainer_broadcast` copies each parameter tensor with one `memcpy` instead of an element-wise loop (runs over all params × replicas every minibatch).
+
+### Fixed
+- `tests/test_parallel` was passing vacuously: its synthetic dataset left the coordinate std at 0 (division by zero → NaN losses), and the NaN-blind `>` threshold comparison reported "ok" regardless. Fixed the dataset stats and made the comparison NaN-proof; the test now genuinely proves serial/parallel gradient equivalence (max abs diff ~1e-8).
 
 ## 2026-07-12
 

@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define GOLDEN_LOSS   0.02706   /* normalized coords + bias init + T/S alternation + AdamW */
+#define GOLDEN_LOSS   0.02700   /* + 8-accumulator matmul_bt summation order (tensor.c) */
 #define GOLDEN_TOL    1e-4
 
 int main(void) {

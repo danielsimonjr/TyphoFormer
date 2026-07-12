@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* One Worker == one full model REPLICA plus everything it needs to process its
  * shard of the minibatch on its own thread. Every field here is thread-private:
@@ -102,8 +103,12 @@ void partrainer_broadcast(ParTrainer *pt, const ParamList *master) {
         assert(r->count == master->count);
         for (int p = 0; p < master->count; ++p) {
             assert(r->item[p].n == master->item[p].n);
-            for (int e = 0; e < master->item[p].n; ++e)
-                r->item[p].v[e] = master->item[p].v[e];
+            /* Each tensor's values are one contiguous float block, so a memcpy
+             * replaces the element loop — this runs once per replica per batch
+             * over ALL parameters (e.g. 5.1M floats x N workers on the full
+             * config), so bulk copy speed matters. */
+            memcpy(r->item[p].v, master->item[p].v,
+                   (size_t)master->item[p].n * sizeof(float));
         }
     }
 }
