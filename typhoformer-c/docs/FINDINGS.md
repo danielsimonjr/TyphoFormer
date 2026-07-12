@@ -405,6 +405,11 @@ adds variance on this much data.
 
 ## Reproduce
 
+The commands below record the exact protocol used for the numbers above
+(`--threads=1` throughout). The cv/gru/xattn/co_spatial paths now also train
+data-parallel — add `--threads=N` for a faster, statistically equivalent run
+(different dropout streams and summation order, same distribution).
+
 ```sh
 # the fix, across splits
 for s in 1 2 3 4 5; do ./typhoformer train 30 --patience=8 --motion --delta --split_seed=$s; done

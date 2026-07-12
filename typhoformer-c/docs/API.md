@@ -65,7 +65,10 @@ program. Read the **Memory model**, **Ownership & lifetime**, and
   `ParamList` *before* dispatch (broadcast) and *after* join (reduce) — never
   concurrently. So there are no locks and no data races (ThreadSanitizer-clean).
   Because the RNG is only used at construction/shuffle time on the main thread,
-  the parallel region touches it not at all.
+  the parallel region touches it not at all. Workers feed each sample's
+  auxiliary inputs (seed velocity, co-active neighbours) from immutable
+  per-record dataset tables into per-worker scratch, so the cv/gru/xattn
+  decoders and `--co_spatial` are covered by the same race-free pattern.
 - **Determinism.** With a fixed `nn_seed`, initialization, shuffling, and the
   whole run are reproducible. There is no wall-clock or `rand()` dependence.
   Multicore reduction reorders floating-point sums, so `--threads>1` matches the
