@@ -7,7 +7,7 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 - [x] **Confirm the long-horizon decoder gains.** Done — they did *not* confirm: across five splits at 24h and 48h, `--gru`/`--xattn` are at parity-or-worse vs plain `--cv`, and the §10 headline flipped under a summation-order numerics perturbation (FINDINGS §11).
 - [x] **Push horizons past 24h.** Done — at `--pred_len=8` (48h) the plain `--cv` decoder beats split-matched constant-velocity on 4/5 splits (−9.3% at 48h), the predicted long-horizon win (FINDINGS §11).
 - [ ] **Scale past 98 storms — the ceiling on everything.** The repo ships 2020–2024 only; the paper uses 20+ years of HURDAT2. Regenerate GPT-4o descriptions (`tools/gen_descriptions.py`, needs `OPENAI_API_KEY`) and MiniLM embeddings (`tools/gen_embeddings.py`) for a longer record span, then re-run the FINDINGS experiment grid.
-- [ ] **Re-test the language branch on harder data.** The robust negative result (`--no_text` marginally *better*) may not hold where text could carry signal the numbers don't — rapid intensification, recurvature, extratropical transition (the open question of FINDINGS §13).
+- [ ] **Re-test the language branch on harder data.** The robust negative result (`--no_text` marginally *better*) may not hold where text could carry signal the numbers don't — rapid intensification, recurvature, extratropical transition (the open question of FINDINGS §14).
 
 ## Speed (from the 2026-07 optimization review)
 
@@ -19,9 +19,10 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 
 ## Accuracy (from the 2026-07 optimization review)
 
-- [ ] **Physics features v2.** Acceleration (Δ²lat, Δ²lon), translation speed + heading as (speed, cos θ, sin θ), day-of-year (sin/cos) — recurvature is seasonal and latitude-dependent; heading change is the curvature target itself. Test with the 5-seed protocol.
-- [ ] **Seed ensembling at eval.** `eval --weights=a.ckpt,b.ckpt,...` averaging predictions in normalized space; multi-seed cv ensembles are cheap now that multicore covers cv.
-- [ ] **Loss shaping at long horizons.** Horizon-weighted MSE (upweight far steps) and a Huber option (fast-moving outlier storms dominate MSE); one honest teacher-forcing-with-annealing test vs always-autoregressive training. Record results — positive or negative — in FINDINGS.
+- [x] **Physics features v2.** Done — `--physics` (acceleration, speed, heading, seasonal phase) beats the cv baseline on **all five splits** at 6h (39.59 → 39.10 km mean); small but sign-consistent (FINDINGS §13).
+- [x] **Seed ensembling at eval.** Done — `eval --weights=a,b,c` with `--split=test` scoring; 3-member cv ensembles recover ~best-member skill on every split (~1% over the expected single model; FINDINGS §13).
+- [x] **Loss shaping at long horizons.** Done for Huber + horizon weights — `--huber=0.1` collapses 48h split variance (±36 → ±14 km, mean −4.8%); `--hweight` is neutral (FINDINGS §13). The teacher-forcing-with-annealing test remains open (tracked below).
+- [ ] **Teacher forcing with annealing.** One honest test vs the always-autoregressive training the decoder currently gets; long rollouts through an untrained correction are a noisy early-training signal. Record the result in FINDINGS either way.
 - [ ] **Motion-aligned frame for the cv correction.** Rotate each step's frame so v points along +x, making the learned curvature correction rotation-invariant (along-track/cross-track). Needs an exact backward through the rotation (dR/dv) to satisfy the gradient-check discipline.
 - [ ] **Text-free data path to scale storms.** The loader requires embedding chunks 1:1 with records, but `--no_text` is marginally *better* — make embeddings optional and add a `tools/hurdat2_to_csv.py` converter from raw NOAA HURDAT2 so the dataset can grow to 2004–2024 (~4× the storms) without paying for GPT-4o/MiniLM. This is the precondition for resolving every "within noise" question in FINDINGS §7–§11.
 

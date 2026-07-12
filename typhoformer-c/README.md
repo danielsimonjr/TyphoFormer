@@ -116,13 +116,16 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
 
-**For accuracy, train with `--motion --cv`**: motion features give the model the
-trajectory signal, and the constant-velocity anchor lets it start at CLIPER and
-learn only the curvature — held-out ΔR ~40.8 km at 6h, and it beats
-constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11). All
-decoder variants work on both the serial and the data-parallel (`--threads=N`)
-paths. `eval`/`predict` auto-detect `--motion` from the checkpoint's feature
-count; pass `--delta`/`--cv` to `eval` to match the checkpoint's decoder.
+**For accuracy, train with `--motion --physics --cv`**: motion features give the
+model the trajectory signal, the physics features add the curvature signal
+(heading, acceleration, seasonal phase — better on all five test splits), and
+the constant-velocity anchor lets it start at CLIPER and learn only the
+correction — held-out ΔR ~39.1 km at 6h, and the cv decoder beats
+constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13).
+All decoder variants work on both the serial and the data-parallel
+(`--threads=N`) paths. `eval`/`predict` auto-detect `--motion`/`--physics` from
+the checkpoint's feature count; pass `--delta`/`--cv` to `eval` to match the
+checkpoint's decoder.
 
 `--no_text` is the key scientific control: it tests whether the GPT-4o/MiniLM
 language branch — the paper's central premise — actually helps versus a
@@ -202,17 +205,20 @@ forward pass 5.6× faster. Backward passes reuse persistent per-module scratch
 buffers, so training does no per-step heap allocation.
 
 Measured on a 4-core container, single-threaded (epoch = 1097 train samples +
-per-epoch validation; your hardware will vary — rerun `bench` to check):
+per-epoch validation; your hardware will vary — rerun `bench` to check). The
+default encoder now skips the dead N=1 spatial blocks (full config 2.77 M
+params; `--spatial` restores the paper's 5.14 M — bench it with
+`bench --full --spatial`):
 
-| Build | Compact config | Full paper config (5.1 M params) |
+| Build | Compact config | Full config (2.77 M params) |
 |:--|:--:|:--:|
-| `make` (portable `-O3`) | ~1.2 s/epoch | ~40 s/epoch |
-| `make NATIVE=1` (`-march=native`) | ~1.2 s/epoch | **~31 s/epoch** |
+| `make` (portable `-O3`) | ~1 s/epoch | ~23 s/epoch |
+| `make NATIVE=1` (`-march=native`) | ~1 s/epoch | **~18 s/epoch** |
 
-(`bench`, full config: portable 10.8 ms forward / 39.6 ms forward+backward per
-sample; NATIVE 6.1 / 20.9 ms.) Native SIMD adds another ~25% on the full
-config; `--threads=N` adds data-parallel scaling across cores on top (see
-**Multicore training** above).
+(`bench`, full config: portable 4.1 ms forward / 14.5 ms forward+backward per
+sample; NATIVE 3.3 / 10.9 ms. For a portable AVX2 binary between the two, use
+`make MARCH=x86-64-v3`.) `--threads=N` adds data-parallel scaling across cores
+on top (see **Multicore training** above).
 For a GPU or other accelerator, implement the ~13-kernel contract in
 [`include/backend.h`](include/backend.h): [`backends/opencl/`](backends/opencl/)
 is a **runnable** OpenCL backend (`make OPENCL=1 test-opencl` verifies the whole
@@ -287,6 +293,7 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 | **`--motion --delta`** (predict displacement) | 48.4 ± 2.6 km | 2.5× better |
 | `--motion --delta --no_text` (numbers only) | 46.7 ± 4.8 km | 2.6× better |
 | **`--motion --cv`** (constant-velocity decoder) | **40.8 km** | **reaches CLIPER (~39 km)** |
+| **`--motion --physics --cv`** (+ heading/accel/season; no-spatial default) | **39.1 km** | **on CLIPER; better on 5/5 splits** |
 
 `--cv` anchors the decoder at constant-velocity extrapolation and learns only the
 curvature — the first architectural change that reaches the constant-velocity
