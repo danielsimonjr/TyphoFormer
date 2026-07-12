@@ -270,11 +270,12 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 
 `--cv` anchors the decoder at constant-velocity extrapolation and learns only the
 curvature — the first architectural change that reaches the constant-velocity
-baseline the model had been trailing (see [FINDINGS §9](docs/FINDINGS.md)). At
-**longer horizons**, giving the decoder memory (`--gru`) or cross-attention over
-the encoder sequence (`--xattn`) pulls further ahead: at 24h, `--xattn` beats
-constant-velocity by ~20% on the favourable split — the first *network* change
-that helps, though it is split-dependent (see [FINDINGS §10](docs/FINDINGS.md)).
+baseline the model had been trailing (see [FINDINGS §9](docs/FINDINGS.md)), and
+at **longer horizons** it passes it: over a 48-hour rollout, `--cv` beats
+split-matched constant-velocity on 4 of 5 storm splits (−9.3% at 48h). Adding
+decoder memory (`--gru`) or cross-attention (`--xattn`) on top did **not**
+survive a five-split re-test — an earlier three-split signal turned out to be
+split noise (see [FINDINGS §10–§11](docs/FINDINGS.md)).
 
 The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
 default model was **blind to motion** (its inputs are intensity + text; position

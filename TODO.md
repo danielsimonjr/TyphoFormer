@@ -4,10 +4,10 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 
 ## Research (the "honest next steps" from FINDINGS.md)
 
-- [ ] **Confirm the long-horizon decoder gains.** `--gru` / `--xattn` beat the constant-velocity decoder at 24h on the favourable split but are split-dependent (FINDINGS §10 calls them "promising, not established"). Repeat across more splits and longer training runs.
+- [x] **Confirm the long-horizon decoder gains.** Done — they did *not* confirm: across five splits at 24h and 48h, `--gru`/`--xattn` are at parity-or-worse vs plain `--cv`, and the §10 headline flipped under a summation-order numerics perturbation (FINDINGS §11).
+- [x] **Push horizons past 24h.** Done — at `--pred_len=8` (48h) the plain `--cv` decoder beats split-matched constant-velocity on 4/5 splits (−9.3% at 48h), the predicted long-horizon win (FINDINGS §11).
 - [ ] **Scale past 98 storms — the ceiling on everything.** The repo ships 2020–2024 only; the paper uses 20+ years of HURDAT2. Regenerate GPT-4o descriptions (`tools/gen_descriptions.py`, needs `OPENAI_API_KEY`) and MiniLM embeddings (`tools/gen_embeddings.py`) for a longer record span, then re-run the FINDINGS experiment grid.
-- [ ] **Re-test the language branch on harder data.** The robust negative result (`--no_text` marginally *better*) may not hold where text could carry signal the numbers don't — rapid intensification, recurvature, extratropical transition (the open question of FINDINGS §11).
-- [ ] **Push horizons past 24h.** Longer horizons are where the learned curvature term should finally pass constant-velocity (FINDINGS §9–§10); `--pred_len` already supports it, the experiments haven't been run.
+- [ ] **Re-test the language branch on harder data.** The robust negative result (`--no_text` marginally *better*) may not hold where text could carry signal the numbers don't — rapid intensification, recurvature, extratropical transition (the open question of FINDINGS §12).
 
 ## Engineering
 

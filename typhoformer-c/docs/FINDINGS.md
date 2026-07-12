@@ -285,7 +285,74 @@ decoder's *memory* is a real lever at long horizons — the honest next step is 
 confirm it with more storms and longer training, where the trend here suggests
 the learned curvature term should pull further ahead of constant-velocity.
 
-## 11. What this means
+> **Superseded by §11.** The five-split re-test below does not confirm this
+> section's signal: the gru/xattn edge over cv disappears (and reverses at 48h),
+> and the favourable seed-5 result flips under a float-rounding-level
+> perturbation. Treat §10 as the honest record of a promising-looking effect
+> that did not survive a stricter test.
+
+## 11. Five-split re-test: the §10 signal does not survive — but cv beats CLIPER at 48h
+
+Section §10 was flagged "promising, not established" on three splits. This
+section re-tests it properly: **five** split seeds, two horizon settings
+(`--pred_len=4` = 24h, `--pred_len=8` = 48h), and a **split-matched CLIPER
+baseline** — a 0-epoch `--cv` checkpoint evaluated on each split's own held-out
+test storms (the untrained cv decoder emits exact constant-velocity, so this is
+CLIPER on precisely the storms the model is scored on, unlike the all-sample
+`baseline` subcommand).
+
+**First, a numerics-sensitivity control.** Between §10 and this re-test the
+matmul kernel's summation order changed (an 8-accumulator vectorization —
+a float-rounding-level perturbation, ~1e-7 relative). Rebuilding the *old*
+kernel reproduces §10's seed-5 headline exactly (mean 115.3 km, 24h 206.3 km);
+the *new* kernel on the identical command gives 127.7 / 232.8 km. **A 26 km
+swing at 24h from rounding order alone** — the "xattn beats constant-velocity
+by 20%" result was split noise amplified by chaotic training sensitivity, not
+a real effect. (Every §11 number below uses the new kernel consistently.)
+
+**24h (`--pred_len=4`), held-out test ΔR mean over 6–24h, five splits:**
+
+| decoder | s1 | s2 | s3 | s4 | s5 | mean |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|
+| *CLIPER (split-matched)* | *150.4* | *137.4* | *152.5* | *127.5* | *120.9* | *137.8* |
+| `--cv` | 143.0 | 134.7 | 141.1 | 135.7 | 127.8 | **136.5** |
+| `--gru` | 143.4 | 136.2 | 140.6 | 143.5 | 129.1 | 138.6 |
+| `--xattn` | 153.2 | 132.1 | 146.6 | 121.9 | 127.7 | 136.3 |
+
+`--gru` never meaningfully beats cv and is 8 km worse on seed 4. `--xattn`
+swings from 14 km better (s4) to 10 km worse (s1) — mean parity, huge variance.
+The §10 ordering (xattn > gru > cv) is gone.
+
+**48h (`--pred_len=8`), held-out test ΔR mean over 6–48h, five splits:**
+
+| decoder | s1 | s2 | s3 | s4 | s5 | mean |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|
+| *CLIPER (split-matched)* | *316.8* | *327.2* | *338.0* | *269.1* | *247.5* | *299.7* |
+| `--cv` | 301.8 | 295.7 | 297.5 | 244.3 | 262.3 | **280.3** |
+| `--gru` | 324.3 | 299.1 | 294.6 | 259.3 | 286.8 | 292.8 |
+| `--xattn` | 319.7 | 298.5 | 277.2 | 269.3 | 287.7 | 290.5 |
+
+At the longer rollout the decoder-memory variants are simply **worse** than the
+plain cv MLP (by 10–12 km on average) — more parameters and state to fit on the
+same 98 storms.
+
+**The real long-horizon result is the plain cv decoder itself.** At 48h,
+split-matched CLIPER vs `--cv`:
+
+| horizon 48h | s1 | s2 | s3 | s4 | s5 | mean |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|
+| *CLIPER* | *638.8* | *704.0* | *699.4* | *564.3* | *529.6* | *627.2* |
+| `--cv` | 608.0 | 584.7 | 594.1 | 497.1 | 559.1 | **568.6** |
+
+`--cv` beats constant-velocity on **4 of 5 splits**, by **−58.6 km (−9.3%) at
+48h** and −19.4 km (−6.5%) over the full 6–48h curve. This is where §9 predicted
+a learned curvature term should finally win — storms recurve over two days and
+dead reckoning drifts — and it does. The lesson of the whole §9–§11 arc: the
+constant-velocity **anchor plus a simple learned correction** is the winning
+recipe at every horizon; adding recurrent memory or cross-attention on top only
+adds variance on this much data.
+
+## 12. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
@@ -296,14 +363,14 @@ the learned curvature term should pull further ahead of constant-velocity.
   Whether it would on a larger, harder dataset (rapid intensification, recurvature,
   extratropical transition — where text might carry signal the numbers don't) is
   the honest open question.
-- **The gap to constant-velocity is now closed** (§9). `--cv` anchors the decoder
-  at constant-velocity instead of persistence and learns only the curvature:
-  49.9 → **40.5 km**, matching the 39.4 km CLIPER baseline (and beating it on one
-  split). The right *parametrization* — like motion in the inputs — is a real
-  lever; a km-aware loss (`--km_loss`) by contrast was **tested and did not help**.
-  The remaining frontier is **longer horizons** (where curvature should let the
-  learned model finally *pass* constant-velocity) and — the ceiling on everything
-  — **more than 98 storms**.
+- **The gap to constant-velocity is now closed** (§9) **and, at long horizons,
+  passed** (§11). `--cv` anchors the decoder at constant-velocity instead of
+  persistence and learns only the curvature: 49.9 → **40.5 km** at 6h, matching
+  the 39.4 km CLIPER baseline — and at 48h it **beats split-matched CLIPER on 4
+  of 5 splits (−9.3%)**, exactly where a learned curvature term should win. The
+  right *parametrization* — like motion in the inputs — is a real lever; a
+  km-aware loss (`--km_loss`) by contrast was **tested and did not help**. The
+  ceiling on everything remains **more than 98 storms**.
 - **The network internals barely move the single-step number** (§7, §8). An encoder
   sweep (no_spatial / posenc / pool=last / prenorm) and two attention upgrades — a
   temporal distance bias (`--timebias`) and *real* multi-node spatial attention over
@@ -312,14 +379,16 @@ the learned curvature term should pull further ahead of constant-velocity.
   zero-init residual) a real training divergence that a single-split run would have
   hidden. The levers that moved the 6h number were all about the physics the model
   sees — motion features, a displacement head, a constant-velocity anchor.
-- **But decoder *memory* is a real lever at long horizons** (§10). Giving the cv
-  rollout a recurrent hidden state (`--gru`) or per-step cross-attention over the
-  encoder sequence (`--xattn`) does nothing at 6h, but the benefit grows with
-  horizon: on the favourable split, `--xattn` at 24h beats constant-velocity by
-  ~50 km (20%). It is split-dependent (promising, not established, on 98 storms),
-  and `--gru` is the more consistent of the two — but this is the first *network*
-  change that clearly helps, exactly where curvature should matter. Confirming it
-  with more storms and longer horizons is the honest next step.
+- **Decoder *memory* did not survive the re-test** (§10 → §11). On three splits,
+  `--gru`/`--xattn` looked like the first network change that helps at long
+  horizons. On **five** splits, at both 24h and 48h, the effect is gone: both
+  variants sit at parity with the plain cv MLP at 24h and are 10–12 km *worse*
+  at 48h. The §10 headline (xattn 20% under CLIPER at 24h) flipped under a
+  float-rounding-level change in matmul summation order — a 26 km swing from
+  numerics alone, which is the clearest demonstration yet of how little a
+  single-split result means on 98 storms. The long-horizon win belongs to the
+  **plain cv decoder** (previous bullet); extra decoder machinery just adds
+  variance at this data scale.
 
 ## Reproduce
 
@@ -332,6 +401,10 @@ for s in 1 3 5; do ./typhoformer train 30 --patience=8 --motion --cv --threads=1
 ./typhoformer train 30 --patience=8 --motion --cv    --threads=1 --pred_len=4 --split_seed=5
 ./typhoformer train 30 --patience=8 --motion --gru   --threads=1 --pred_len=4 --split_seed=5
 ./typhoformer train 30 --patience=8 --motion --xattn --threads=1 --pred_len=4 --split_seed=5
+# the five-split re-test at 24h and 48h (§11); a 0-epoch cv run = split-matched CLIPER
+for P in 4 8; do for s in 1 2 3 4 5; do for dec in cv gru xattn; do
+  ./typhoformer train 30 --patience=8 --motion --$dec --threads=1 --pred_len=$P --split_seed=$s
+done; ./typhoformer train 0 --motion --cv --threads=1 --pred_len=$P --split_seed=$s; done; done
 # does text help the fixed model?
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42            # with text
 ./typhoformer train 30 --patience=8 --motion --delta --split_seed=42 --no_text  # numbers only
