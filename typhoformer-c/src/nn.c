@@ -180,10 +180,12 @@ void linear_backward(Linear *l, const Mat dy, Mat dx) {
             for (int j = 0; j < in; ++j) dWr[j] += a * xr[j];
         }
     }
-    for (int i = 0; i < out; ++i) {                 /* db += colsum(dy) */
-        float bsum = 0.0f;
-        for (int p = 0; p < T; ++p) bsum += dy.data[p * out + i];
-        l->db[i] += bsum;
+    /* db += colsum(dy), accumulated row-by-row: the p-outer/i-inner order walks
+     * dy contiguously and updates db[i] with independent adds (vectorizable),
+     * instead of a strided single-accumulator reduction per column. */
+    for (int p = 0; p < T; ++p) {
+        const float *restrict dyr = &dy.data[p * out];
+        for (int i = 0; i < out; ++i) l->db[i] += dyr[i];
     }
     if (dx.data) mat_matmul(dy, l->W, dx);          /* dx = dy @ W (overwrites dx) */
 }
@@ -594,19 +596,39 @@ void mha_forward(MHA *m, const Mat x, Mat y) {
         const int off = h * hd;                                      /* this head's column offset in [S,D] */
         const float slope = g_timebias ? alibi_slope(h, H) : 0.0f;   /* ALiBi recency prior */
         Mat P = m->P[h];
-        for (int i = 0; i < S; ++i)
+        const int hd4 = hd & ~3;                                     /* multiple of 4 <= hd */
+        for (int i = 0; i < S; ++i) {
+            const float *restrict Qrow = &m->Q.data[i * D + off];
             for (int j = 0; j < S; ++j) {
-                float acc = 0.0f;                                    /* Q_h[i]·K_h[j] over the hd head dims */
-                for (int d = 0; d < hd; ++d) acc += m->Q.data[i * D + off + d] * m->K.data[j * D + off + d];
+                /* Q_h[i]·K_h[j]: contiguous dot over hd dims, split across 4
+                 * accumulators to break the float-add dependency chain (same
+                 * trick as mat_matmul_bt; head widths are multiples of 4). */
+                const float *restrict Krow = &m->K.data[j * D + off];
+                float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+                for (int d = 0; d < hd4; d += 4) {
+                    a0 += Qrow[d    ] * Krow[d    ];
+                    a1 += Qrow[d + 1] * Krow[d + 1];
+                    a2 += Qrow[d + 2] * Krow[d + 2];
+                    a3 += Qrow[d + 3] * Krow[d + 3];
+                }
+                float acc = (a0 + a1) + (a2 + a3);
+                for (int d = hd4; d < hd; ++d) acc += Qrow[d] * Krow[d];
                 P.data[i * S + j] = acc * scale - slope * (float)abs(i - j);   /* bias is a constant */
             }
+        }
         softmax_rows(P);
-        for (int i = 0; i < S; ++i)                                  /* O_h[i] = Σ_j P[i,j]·V_h[j] */
-            for (int d = 0; d < hd; ++d) {
-                float acc = 0.0f;
-                for (int j = 0; j < S; ++j) acc += P.data[i * S + j] * m->V.data[j * D + off + d];
-                m->Ocat.data[i * D + off + d] = acc;                 /* write into head h's slice of Ocat */
+        /* O_h[i] = Σ_j P[i,j]·V_h[j], accumulated j-by-j so the inner d-loop
+         * streams V's row contiguously (independent adds, vectorizable) instead
+         * of a strided reduction per (i,d). */
+        for (int i = 0; i < S; ++i) {
+            float *restrict Orow = &m->Ocat.data[i * D + off];
+            for (int d = 0; d < hd; ++d) Orow[d] = 0.0f;
+            for (int j = 0; j < S; ++j) {
+                const float p = P.data[i * S + j];
+                const float *restrict Vrow = &m->V.data[j * D + off];
+                for (int d = 0; d < hd; ++d) Orow[d] += p * Vrow[d];
             }
+        }
     }
     linear_forward(&m->o, m->Ocat, y);
 }
@@ -641,19 +663,39 @@ void mha_backward(MHA *m, const Mat dy, Mat dx) {
     for (int h = 0; h < H; ++h) {
         const int off = h * hd;
         Mat P = m->P[h];
-        /* dP[i,j] = sum_d dOh[i,d] * Vh[j,d] ;  dVh[j,d] = sum_i P[i,j]*dOh[i,d] */
-        for (int i = 0; i < S; ++i)
+        const int hd4 = hd & ~3;
+        /* dP[i,j] = sum_d dOh[i,d] * Vh[j,d] — contiguous dot, 4 accumulators
+         * (see mha_forward's score loop for why the chain is split). */
+        for (int i = 0; i < S; ++i) {
+            const float *restrict dOrow = &dOcat.data[i * D + off];
             for (int j = 0; j < S; ++j) {
-                float acc = 0.0f;
-                for (int d = 0; d < hd; ++d) acc += dOcat.data[i * D + off + d] * m->V.data[j * D + off + d];
+                const float *restrict Vrow = &m->V.data[j * D + off];
+                float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+                for (int d = 0; d < hd4; d += 4) {
+                    a0 += dOrow[d    ] * Vrow[d    ];
+                    a1 += dOrow[d + 1] * Vrow[d + 1];
+                    a2 += dOrow[d + 2] * Vrow[d + 2];
+                    a3 += dOrow[d + 3] * Vrow[d + 3];
+                }
+                float acc = (a0 + a1) + (a2 + a3);
+                for (int d = hd4; d < hd; ++d) acc += dOrow[d] * Vrow[d];
                 dP.data[i * S + j] = acc;
             }
-        for (int j = 0; j < S; ++j)
-            for (int d = 0; d < hd; ++d) {
-                float acc = 0.0f;
-                for (int i = 0; i < S; ++i) acc += P.data[i * S + j] * dOcat.data[i * D + off + d];
-                dV.data[j * D + off + d] = acc;
+        }
+        /* dVh[j,d] = sum_i P[i,j]*dOh[i,d], accumulated i-by-i so the inner
+         * d-loop streams both rows contiguously (independent adds). */
+        for (int j = 0; j < S; ++j) {
+            float *restrict dVrow = &dV.data[j * D + off];
+            for (int d = 0; d < hd; ++d) dVrow[d] = 0.0f;
+        }
+        for (int i = 0; i < S; ++i) {
+            const float *restrict dOrow = &dOcat.data[i * D + off];
+            for (int j = 0; j < S; ++j) {
+                const float p = P.data[i * S + j];
+                float *restrict dVrow = &dV.data[j * D + off];
+                for (int d = 0; d < hd; ++d) dVrow[d] += p * dOrow[d];
             }
+        }
         /* softmax backward per row: dsc[i,:] = P[i,:] * (dP[i,:] - sum_k dP[i,k]P[i,k]) */
         for (int i = 0; i < S; ++i) {
             float dot = 0.0f;
@@ -661,19 +703,26 @@ void mha_backward(MHA *m, const Mat dy, Mat dx) {
             for (int j = 0; j < S; ++j)
                 dsc.data[i * S + j] = P.data[i * S + j] * (dP.data[i * S + j] - dot) * scale;
         }
-        /* dQh[i,d] = sum_j dsc[i,j]*Kh[j,d] ; dKh[j,d] = sum_i dsc[i,j]*Qh[i,d] */
-        for (int i = 0; i < S; ++i)
-            for (int d = 0; d < hd; ++d) {
-                float acc = 0.0f;
-                for (int j = 0; j < S; ++j) acc += dsc.data[i * S + j] * m->K.data[j * D + off + d];
-                dQ.data[i * D + off + d] = acc;
+        /* dQh[i,d] = sum_j dsc[i,j]*Kh[j,d] ; dKh[j,d] = sum_i dsc[i,j]*Qh[i,d]
+         * — both accumulated with a contiguous inner d-loop over the source row. */
+        for (int i = 0; i < S; ++i) {
+            float *restrict dQrow = &dQ.data[i * D + off];
+            for (int d = 0; d < hd; ++d) dQrow[d] = 0.0f;
+            for (int j = 0; j < S; ++j) {
+                const float s = dsc.data[i * S + j];
+                const float *restrict Krow = &m->K.data[j * D + off];
+                for (int d = 0; d < hd; ++d) dQrow[d] += s * Krow[d];
             }
-        for (int j = 0; j < S; ++j)
-            for (int d = 0; d < hd; ++d) {
-                float acc = 0.0f;
-                for (int i = 0; i < S; ++i) acc += dsc.data[i * S + j] * m->Q.data[i * D + off + d];
-                dK.data[j * D + off + d] = acc;
+        }
+        for (int j = 0; j < S; ++j) {
+            float *restrict dKrow = &dK.data[j * D + off];
+            for (int d = 0; d < hd; ++d) dKrow[d] = 0.0f;
+            for (int i = 0; i < S; ++i) {
+                const float s = dsc.data[i * S + j];
+                const float *restrict Qrow = &m->Q.data[i * D + off];
+                for (int d = 0; d < hd; ++d) dKrow[d] += s * Qrow[d];
             }
+        }
     }
     ensure(&m->s_dxq, S, D); ensure(&m->s_dxk, S, D);
     Mat dxq = m->s_dxq, dxk = m->s_dxk;

@@ -227,9 +227,21 @@ void  model_forward(Model *m, const Mat xnum, const Mat xtext, const Mat yprev);
 void  model_backward(Model *m, const Mat dpred, const Mat dgate_pen);
 void  model_free(Model *m);
 
-/* Loss = MSE(pred,Y) + lambda * mean(relu(0.6 - gate)^2).
- * If dpred / dgate_pen are non-NULL they receive the upstream gradients. */
+/* Loss = mean_i w_h(i)·huber(pred_i − Y_i) + lambda * mean(relu(0.6 - gate)^2).
+ * With both loss-shaping options off (the default) this is exactly
+ * MSE(pred,Y) + the gate penalty. If dpred / dgate_pen are non-NULL they
+ * receive the upstream gradients. */
 double model_loss(const Mat pred, const Mat Y, const Mat gate, float lambda,
                   Mat dpred, Mat dgate_pen);
+
+/* Loss shaping (both off by default; set before training — they are read on
+ * every model_loss call, on the serial and the data-parallel path alike):
+ *   model_set_huber(δ)  : Huber loss with transition point δ on the NORMALIZED
+ *                         residual (quadratic core == MSE inside |r|<=δ, linear
+ *                         tails outside). δ=0 disables (plain MSE).
+ *   model_set_hweight(γ): weight forecast step h by (h+1)^γ, normalized to
+ *                         mean 1 — γ>0 upweights long horizons. γ=0 disables. */
+void model_set_huber(float delta);
+void model_set_hweight(float gamma);
 
 #endif /* TYPHOFORMER_MODEL_H */

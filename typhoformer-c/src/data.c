@@ -315,6 +315,54 @@ void dataset_add_motion(Dataset *d) {
     free(d->num); d->num = nm; d->d_num = nd;
 }
 
+/* Append 7 second-order physics features to every record, growing d->d_num by
+ * 7. The new columns, in order (all RAW here; standardized later):
+ *   [old+0] alat   — acceleration:  Δlat_i − Δlat_{i-1}  (0 unless i-2 in-storm)
+ *   [old+1] alon   — acceleration:  Δlon_i − Δlon_{i-1}
+ *   [old+2] speed  — translation speed |v| = √(Δlat² + Δlon²), degrees/step
+ *   [old+3] ulat   — heading unit vector, lat component  (v/|v|; 0 when |v|≈0)
+ *   [old+4] ulon   — heading unit vector, lon component
+ *   [old+5] dsin   — sin(2π·day-of-year/365.25)   seasonal phase
+ *   [old+6] dcos   — cos(2π·day-of-year/365.25)
+ * Rationale: recurvature is what the cv decoder's correction must learn, and it
+ * is literally a change of heading — so hand the model acceleration, speed, and
+ * heading explicitly instead of hoping attention derives them from position
+ * pairs; steering flow is seasonal and the (sin,cos) phase encodes that without
+ * a year-end discontinuity. Like dataset_add_motion this must run BEFORE
+ * dataset_standardize, works within storm boundaries (velocities do not reach
+ * across storms), and is a no-op on the .tfb path (no coordinate history). */
+void dataset_add_physics(Dataset *d) {
+    if (d->prewindowed) return;
+    int old = d->d_num, nd = old + 7;
+    float *nm = (float *)malloc((size_t)d->n_records * nd * sizeof(float));
+    for (int i = 0; i < d->n_records; ++i) {
+        memcpy(&nm[(size_t)i * nd], &d->num[(size_t)i * old], (size_t)old * sizeof(float));
+        float *o = &nm[(size_t)i * nd + old];
+        int s1 = (i > 0 && d->gid[i] == d->gid[i - 1]);   /* i-1 in the same storm */
+        int s2 = (i > 1 && d->gid[i] == d->gid[i - 2]);   /* i-2 too (gids contiguous) */
+        float vlat = s1 ? d->lat[i] - d->lat[i - 1] : 0.0f;
+        float vlon = s1 ? d->lon[i] - d->lon[i - 1] : 0.0f;
+        float plat = s2 ? d->lat[i - 1] - d->lat[i - 2] : 0.0f;
+        float plon = s2 ? d->lon[i - 1] - d->lon[i - 2] : 0.0f;
+        o[0] = (s1 && s2) ? vlat - plat : 0.0f;           /* acceleration */
+        o[1] = (s1 && s2) ? vlon - plon : 0.0f;
+        float speed = sqrtf(vlat * vlat + vlon * vlon);
+        o[2] = speed;
+        o[3] = (speed > 1e-6f) ? vlat / speed : 0.0f;     /* heading unit vector */
+        o[4] = (speed > 1e-6f) ? vlon / speed : 0.0f;
+        /* tkey = YYYYMMDD·1e4 + HHMM: recover month/day, approximate the
+         * day-of-year (month lengths averaged — phase accuracy of ±2 days is
+         * plenty for a seasonal signal), and encode it as a continuous angle. */
+        long date = d->tkey ? d->tkey[i] / 10000L : 0;
+        int month = (int)((date / 100) % 100), day = (int)(date % 100);
+        double doy = (month - 1) * 30.44 + day;
+        double ang = 2.0 * 3.14159265358979323846 * doy / 365.25;
+        o[5] = (float)sin(ang);
+        o[6] = (float)cos(ang);
+    }
+    free(d->num); d->num = nm; d->d_num = nd;
+}
+
 /* ---- co-active spatial neighbours -----------------------------------
  * Multiple storms can be alive at the same moment (same tkey). For each record
  * we record up to TF_NBR_K other storms active at that instant, each as a

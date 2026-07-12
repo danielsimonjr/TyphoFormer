@@ -27,6 +27,8 @@
 #include "optim.h"
 #include "parallel.h"
 
+#include <pthread.h>
+
 #include <math.h>
 #include <time.h>
 #include <stdio.h>
@@ -67,14 +69,15 @@ typedef struct {
     double mmae, mkm, mbase;                    /* horizon means of the three arrays above */
 } Eval;
 
-/* Score model `m` over the `n` samples named by index array `idx` (or samples
- * 0..n-1 when idx==NULL). Returns per-horizon and mean metrics. This is called
- * with the VAL split each epoch (for checkpoint selection) and with the TEST
- * split once at the end; it never touches optimizer state or gradients. */
-static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
-    nn_set_training(0);                              /* dropout off for evaluation (deterministic forward) */
-    int H = d->pred_len < MAXH ? d->pred_len : MAXH; /* clamp horizons to the Eval array bound */
-    /* Scratch tensors reused across all samples. Shapes:
+/* Accumulate raw metric SUMS for samples idx[i0..i1) (or samples i0..i1-1 when
+ * idx==NULL) into mae/km/base (each MAXH-long, zeroed by the caller). Scores
+ * the ENSEMBLE MEAN of the nm models' predictions (nm==1 is the ordinary
+ * single-model case; averaging is done in normalized coordinate space, which
+ * commutes with the linear denorm). Thread-safe as long as each concurrent
+ * call has its own Model instance(s). */
+static void eval_span(Model *const *ms, int nm, const Dataset *d, const int *idx,
+                      int i0, int i1, int H, double *mae, double *km, double *base) {
+    /* Scratch tensors reused across this span's samples. Shapes:
      *   xn  [in_len × d_num]  numeric feature window
      *   xt  [in_len × d_text] text-embedding window
      *   yp  [1 × 2]           seed coordinate (last observed lat,lon, normalized)
@@ -83,38 +86,98 @@ static Eval evaluate(Model *m, const Dataset *d, const int *idx, int n) {
     Mat yp = mat_new(1, 2), Y = mat_new(d->pred_len, 2);
     Mat nbr = mat_new(TF_NBR_K, TF_NBR_NF);          /* co-active neighbour features [K × NF] for --co_spatial */
     Mat vel = mat_new(1, 2);                         /* seed velocity (Δlat,Δlon) for the cv/gru/xattn decoder */
-    Eval e; memset(&e, 0, sizeof e); e.H = H;
-    for (int i = 0; i < n; ++i) {
+    double apred[2 * MAXH];                          /* ensemble-mean prediction, normalized coords */
+    for (int i = i0; i < i1; ++i) {
         int s = idx ? idx[i] : i;                    /* map dense loop index to the real sample id */
         dataset_get(d, s, xn, xt, yp, Y);
-        /* Feed the same auxiliary inputs the model saw in training so eval is
-         * apples-to-apples. These are no-ops for the model heads that ignore
-         * them, so it is safe to always populate both. */
-        int nc; dataset_neighbors(d, s, nbr, &nc); model_set_neighbors(m, nbr, nc);   /* spatial context */
-        dataset_seed_velocity(d, s, vel); model_set_seed_velocity(m, vel);            /* constant-velocity anchor */
-        model_forward(m, xn, xt, yp);
+        for (int h = 0; h < 2 * H; ++h) apred[h] = 0.0;
+        for (int k = 0; k < nm; ++k) {
+            Model *m = ms[k];
+            /* Feed the same auxiliary inputs the model saw in training so eval is
+             * apples-to-apples. These are no-ops for the model heads that ignore
+             * them, so it is safe to always populate both. */
+            int nc; dataset_neighbors(d, s, nbr, &nc); model_set_neighbors(m, nbr, nc);   /* spatial context */
+            dataset_seed_velocity(d, s, vel); model_set_seed_velocity(m, vel);            /* constant-velocity anchor */
+            model_forward(m, xn, xt, yp);
+            for (int h = 0; h < 2 * H; ++h) apred[h] += m->pred.data[h];
+        }
+        for (int h = 0; h < 2 * H; ++h) apred[h] /= nm;
         float seed[2] = { yp.data[0], yp.data[1] };  /* copy seed before denorm; used for persistence baseline */
         dataset_denorm(d, seed);                        /* coords back to degrees for metrics */
         for (int h = 0; h < H; ++h) {
-            float p[2] = { m->pred.data[h * 2], m->pred.data[h * 2 + 1] };  /* model prediction at horizon h */
+            float p[2] = { (float)apred[h * 2], (float)apred[h * 2 + 1] };  /* (mean) prediction at horizon h */
             float t[2] = { Y.data[h * 2],       Y.data[h * 2 + 1] };        /* ground truth at horizon h    */
             dataset_denorm(d, p); dataset_denorm(d, t);   /* everything in degrees before distance/MAE */
             /* MAE is on DENORMALIZED degrees, averaged over the 2 coord axes.
              * (Note: this reports degree error, not the normalized-space loss
              * the network minimizes — it is a human-readable companion to ΔR.) */
-            e.mae[h]     += (fabs(p[0] - t[0]) + fabs(p[1] - t[1])) / 2.0;
-            e.km[h]      += haversine(p[0], p[1], t[0], t[1]);              /* model great-circle error, km */
+            mae[h]  += (fabs(p[0] - t[0]) + fabs(p[1] - t[1])) / 2.0;
+            km[h]   += haversine(p[0], p[1], t[0], t[1]);              /* model great-circle error, km */
             /* Persistence baseline: assume the storm does not move, i.e. every
              * future position equals the seed. A useful model must beat this. */
-            e.base_km[h] += haversine(seed[0], seed[1], t[0], t[1]);   /* persistence */
+            base[h] += haversine(seed[0], seed[1], t[0], t[1]);   /* persistence */
         }
+    }
+    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&nbr); mat_free(&vel);
+}
+
+/* One thread's eval job: a replica model and a [i0,i1) span of the sample list. */
+typedef struct {
+    Model *m; const Dataset *d; const int *idx;
+    int i0, i1, H;
+    double mae[MAXH], km[MAXH], base[MAXH];
+    pthread_t tid;
+} EvalJob;
+
+static void *eval_worker(void *arg) {
+    EvalJob *j = (EvalJob *)arg;
+    eval_span(&j->m, 1, j->d, j->idx, j->i0, j->i1, j->H, j->mae, j->km, j->base);
+    return NULL;
+}
+
+/* Score model `m` over the `n` samples named by index array `idx` (or samples
+ * 0..n-1 when idx==NULL). Returns per-horizon and mean metrics. This is called
+ * with the VAL split each epoch (for checkpoint selection) and with the TEST
+ * split once at the end; it never touches optimizer state or gradients.
+ *
+ * When a ParTrainer pool is supplied (pt != NULL, from --threads=N), the eval
+ * set is SHARDED across the replica models: `pl` (the master weights) is
+ * broadcast to the replicas, each worker thread scores a contiguous span with
+ * its own replica, and the per-span metric sums are reduced here. Every replica
+ * owns its scratch, so this is race-free; only the double-precision summation
+ * order differs from serial (≈1e-12 relative on the printed means). Pass
+ * pt=NULL (or n too small to shard) for the original single-thread path. */
+static Eval evaluate(Model *m, const ParamList *pl, ParTrainer *pt,
+                     const Dataset *d, const int *idx, int n) {
+    nn_set_training(0);                              /* dropout off for evaluation (deterministic forward) */
+    int H = d->pred_len < MAXH ? d->pred_len : MAXH; /* clamp horizons to the Eval array bound */
+    Eval e; memset(&e, 0, sizeof e); e.H = H;
+    int W = pt ? partrainer_workers(pt) : 1;
+    if (pt && W > 1 && n >= 2 * W) {
+        partrainer_broadcast(pt, pl);                /* replicas <- current master weights */
+        EvalJob *jobs = (EvalJob *)calloc((size_t)W, sizeof(EvalJob));
+        int base_n = n / W, rem = n % W, off = 0;
+        for (int w = 0; w < W; ++w) {                /* contiguous spans, sizes differ by <=1 */
+            jobs[w].m = partrainer_model(pt, w);
+            jobs[w].d = d; jobs[w].idx = idx; jobs[w].H = H;
+            jobs[w].i0 = off; off += base_n + (w < rem ? 1 : 0); jobs[w].i1 = off;
+        }
+        for (int w = 1; w < W; ++w) pthread_create(&jobs[w].tid, NULL, eval_worker, &jobs[w]);
+        eval_worker(&jobs[0]);                       /* worker 0 on the calling thread */
+        for (int w = 1; w < W; ++w) pthread_join(jobs[w].tid, NULL);
+        for (int w = 0; w < W; ++w)
+            for (int h = 0; h < H; ++h) {
+                e.mae[h] += jobs[w].mae[h]; e.km[h] += jobs[w].km[h]; e.base_km[h] += jobs[w].base[h];
+            }
+        free(jobs);
+    } else {
+        eval_span(&m, 1, d, idx, 0, n, H, e.mae, e.km, e.base_km);
     }
     for (int h = 0; h < H; ++h) {
         e.mae[h] /= n; e.km[h] /= n; e.base_km[h] /= n;                    /* sum → mean over samples */
         e.mmae += e.mae[h]; e.mkm += e.km[h]; e.mbase += e.base_km[h];     /* accumulate for horizon mean */
     }
     e.mmae /= H; e.mkm /= H; e.mbase /= H;           /* mean across horizons — mkm is the model-selection metric */
-    mat_free(&xn); mat_free(&xt); mat_free(&yp); mat_free(&Y); mat_free(&nbr); mat_free(&vel);
     return e;
 }
 
@@ -170,6 +233,9 @@ static int cmd_train(int argc, char **argv) {
     int warmup = 0;                   /* linear LR warmup steps: lr ramps 0→lr over the first `warmup` steps (0 = off) */
     int no_text = 0;                  /* ablation: zero out the text-embedding stream (numbers-only model) */
     int motion = 0;                   /* feature aug: append (lat,lon,dlat,dlon) to numeric inputs — CHANGES d_num */
+    int physics = 0;                  /* feature aug v2: acceleration, speed, heading, day-of-year — CHANGES d_num (+7) */
+    float huber = 0.0f;               /* Huber loss transition point on the normalized residual (0 = MSE) */
+    float hweight = 0.0f;             /* horizon-weight exponent: step h weighted (h+1)^γ, mean-normalized (0 = uniform) */
     int delta = 0;                    /* decoder predicts displacement from the seed instead of absolute coords */
     /* --- decoder variants ---
      * These change the parameter set, so they must be set before model_new AND
@@ -182,8 +248,10 @@ static int cmd_train(int argc, char **argv) {
     int xattn = 0;                    /* cv + decoder cross-attention over the encoder sequence (implies cv) */
     int km_loss = 0;                  /* reweight the longitude gradient by cos^2(lat) so loss ≈ km error (serial only) */
     /* Encoder structural options (see cmd_eval — each must be re-passed to
-     * evaluate a checkpoint trained with it, since they alter the param set): */
-    int no_spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
+     * evaluate a checkpoint trained with it, since they alter the param set).
+     * spatial=0 is the DEFAULT (no N=1 spatial blocks — FINDINGS §7); pass
+     * --spatial for the paper-faithful architecture. */
+    int spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
     unsigned long seed = 20260711, split_seed = 42;   /* weight-init/dropout RNG seed; storm-split RNG seed */
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     /* Hand-rolled getopt: each arg is either a "--flag" toggle or a
@@ -214,6 +282,9 @@ static int cmd_train(int argc, char **argv) {
         else if (!strncmp(argv[i], "--resume=", 9))    resume = argv[i] + 9;            /* checkpoint to continue from */
         else if (!strcmp(argv[i], "--no_text"))        no_text = 1;
         else if (!strcmp(argv[i], "--motion"))         motion = 1;
+        else if (!strcmp(argv[i], "--physics"))        physics = 1;
+        else if (!strncmp(argv[i], "--huber=", 8))     huber = (float)atof(argv[i] + 8);
+        else if (!strncmp(argv[i], "--hweight=", 10))  hweight = (float)atof(argv[i] + 10);
         else if (!strcmp(argv[i], "--delta"))          delta = 1;
         /* --gru and --xattn each force cv=1 too: they are curvature corrections
          * layered on top of the constant-velocity anchor, not standalone modes. */
@@ -221,7 +292,8 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--gru"))          { gru = 1; cv = 1; }
         else if (!strcmp(argv[i], "--xattn"))        { xattn = 1; cv = 1; }
         else if (!strcmp(argv[i], "--km_loss"))        km_loss = 1;
-        else if (!strcmp(argv[i], "--no_spatial"))     no_spatial = 1;   /* drop the spatial-gating branch */
+        else if (!strcmp(argv[i], "--spatial"))        spatial = 1;      /* restore the paper's N=1 spatial blocks */
+        else if (!strcmp(argv[i], "--no_spatial"))     spatial = 0;      /* legacy: now the default */
         else if (!strcmp(argv[i], "--posenc"))         posenc = 1;       /* add sinusoidal positional encoding */
         else if (!strcmp(argv[i], "--pool=last"))      pool_last = 1;    /* pool the last token instead of mean */
         else if (!strcmp(argv[i], "--prenorm"))        prenorm = 1;      /* pre-LN transformer block ordering */
@@ -251,6 +323,7 @@ static int cmd_train(int argc, char **argv) {
      * model is built to match the data rather than the requested config. */
     if (bin) { c.in_len = ds.in_len; c.pred_len = ds.pred_len; c.d_text = ds.d_text; }
     if (motion) dataset_add_motion(&ds);             /* +lat,lon,dlat,dlon (before standardize) — grows d_num by 4 */
+    if (physics) dataset_add_physics(&ds);           /* +accel,speed,heading,seasonal phase — grows d_num by 7 */
     if (co_spatial) dataset_build_neighbors(&ds);    /* precompute co-active storm neighbours for the spatial branch */
     c.d_num = ds.d_num;                              /* lock the model's numeric input width to the (possibly grown) dataset */
     /* Leakage-safe: split whole STORMS into train/val/test, then fit feature +
@@ -265,9 +338,9 @@ static int cmd_train(int argc, char **argv) {
     dataset_standardize(&ds);                        /* z-score features + coords using TRAIN-only statistics */
     int *train = sp.train, *val = sp.val, *test = sp.test;   /* arrays of sample ids per split */
     int ntr = sp.n_train, nva = sp.n_val, nte = sp.n_test;   /* their counts */
-    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu | d_num=%d%s%s\n",
+    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu | d_num=%d%s%s%s\n",
            ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed, ds.d_num,
-           motion ? " (+motion)" : "", no_text ? " | NO-TEXT" : "");
+           motion ? " (+motion)" : "", physics ? " (+physics)" : "", no_text ? " | NO-TEXT" : "");
     /* Announce the active decoder branch. The order mirrors precedence below:
      * gru → xattn → cv → delta, each printed only if the higher ones are off. */
     if (gru)        printf("decoder: constant-velocity + GRU memory (recurrent curvature)\n");
@@ -287,8 +360,12 @@ static int cmd_train(int argc, char **argv) {
     else if (xattn) model_set_xattn(1);
     else if (cv)    model_set_cv(1);          /* cv is a superset of delta; takes precedence */
     else if (delta) model_set_delta(1);
-    model_set_no_spatial(no_spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
+    model_set_no_spatial(!spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
     nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
+    /* Loss shaping (globals read by every model_loss call, both training paths). */
+    model_set_huber(huber); model_set_hweight(hweight);
+    if (huber > 0.0f)    printf("loss: Huber, delta=%.3f (normalized residual)\n", huber);
+    if (hweight != 0.0f) printf("loss: horizon-weighted, gamma=%.2f\n", hweight);
     ParamList pl; plist_init(&pl);                   /* flat registry of all trainable tensors + their grads */
     Model m = model_new(&c, &pl);                    /* build the model, registering its params into `pl` */
     Adam opt = adam_new(&pl, lr, wd);                /* AdamW state (m,v moments) sized to `pl` */
@@ -321,7 +398,7 @@ static int cmd_train(int argc, char **argv) {
     Mat vel = mat_new(1, 2);                         /* seed velocity scratch (cv/gru/xattn) */
 
     /* Epoch 0 = the randomly initialized model, scored for a baseline. */
-    Eval e0 = evaluate(&m, &ds, val, nva);
+    Eval e0 = evaluate(&m, &pl, pt, &ds, val, nva);
     printf("epoch  0 (init)          | val MAE %.4f | val dR %.2f km  (persistence %.2f km)\n",
            e0.mmae, e0.mkm, e0.mbase);
     /* Best-checkpoint tracking: `best` is the lowest val ΔR (km) seen so far;
@@ -391,7 +468,7 @@ static int cmd_train(int argc, char **argv) {
         }
         /* End-of-epoch validation. Model selection is on val ΔR (mkm), NOT on
          * training loss, so we keep the checkpoint that generalizes best. */
-        Eval e = evaluate(&m, &ds, val, nva);
+        Eval e = evaluate(&m, &pl, pt, &ds, val, nva);
         printf("epoch %2d | train loss %.5f | val MAE %.4f | val dR %.2f km\n", ep, run_loss / nb, e.mmae, e.mkm);
         if (e.mkm < best) {                          /* keep the best model on disk */
             best = e.mkm; best_ep = ep; best_e = e; since_improve = 0;   /* new best: reset the patience counter */
@@ -421,7 +498,7 @@ static int cmd_train(int argc, char **argv) {
      * may be worse than the best; loading `save` restores the selected model. */
     if (nte > 0) {
         checkpoint_load_params(save, &pl);           /* overwrite live weights with the best checkpoint */
-        Eval te = evaluate(&m, &ds, test, nte);
+        Eval te = evaluate(&m, &pl, pt, &ds, test, nte);
         printf("HELD-OUT TEST: dR %.2f km | MAE %.4f  (persistence %.2f km) over %d samples\n",
                te.mkm, te.mmae, te.mbase, nte);
         print_horizons(&te);
@@ -433,6 +510,17 @@ static int cmd_train(int argc, char **argv) {
     if (pt) partrainer_free(pt);
     split_free(&sp); adam_free(&opt); model_free(&m); plist_free(&pl); dataset_free(&ds);
     return 0;
+}
+
+/* Reproduce a checkpoint's feature augmentation by width arithmetic: --motion
+ * adds exactly 4 numeric columns, --physics adds 7, both together add 11 — so
+ * the difference between the checkpoint's d_num and the raw dataset's uniquely
+ * identifies which augmentations to re-apply before evaluation. */
+static void apply_feature_aug(Dataset *ds, int ckpt_dnum) {
+    if (ds->prewindowed) return;
+    int diff = ckpt_dnum - ds->d_num;
+    if (diff == 4 || diff == 11) dataset_add_motion(ds);
+    if (diff == 7 || diff == 11) dataset_add_physics(ds);
 }
 
 /* Apply a checkpoint's (train-only) normalization to a freshly loaded raw
@@ -461,47 +549,109 @@ static void apply_ckpt_stats(Dataset *ds, const char *weights) {
  * flag to trigger neighbour precomputation on the dataset. */
 static int cmd_eval(int argc, char **argv) {
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *weights = DEF_CKPT;
-    int no_text = 0, co_spatial = 0;
+    int no_text = 0, co_spatial = 0, threads = 1;
+    /* Optional split-restricted scoring: --split_seed=S --split=test re-derives
+     * the storm-level partition a checkpoint was trained with (same S => same
+     * deterministic split) and scores ONLY that subset — the honest way to
+     * report held-out numbers from `eval` (the default scores ALL samples,
+     * which mixes training storms in). -1 = no restriction. */
+    unsigned long split_seed = 42; int split_which = -1;
     for (int i = 1; i < argc; ++i) {
         if      (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;   /* checkpoint to evaluate */
         else if (!strncmp(argv[i], "--csv=", 6))      csv = argv[i] + 6;
         else if (!strncmp(argv[i], "--emb=", 6))      emb = argv[i] + 6;
         else if (!strncmp(argv[i], "--bin=", 6))      bin = argv[i] + 6;
+        else if (!strncmp(argv[i], "--threads=", 10)) threads = atoi(argv[i] + 10);  /* shard eval across cores */
+        else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);
+        else if (!strcmp(argv[i], "--split=test"))   split_which = 2;   /* score the held-out test storms only */
+        else if (!strcmp(argv[i], "--split=val"))    split_which = 1;
+        else if (!strcmp(argv[i], "--split=train"))  split_which = 0;
         else if (!strcmp(argv[i], "--no_text"))       no_text = 1;
         /* Structural flags — MUST match the checkpoint's training flags: */
         else if (!strcmp(argv[i], "--delta"))         model_set_delta(1);
         else if (!strcmp(argv[i], "--cv"))            model_set_cv(1);
         else if (!strcmp(argv[i], "--gru"))           model_set_gru(1);
         else if (!strcmp(argv[i], "--xattn"))         model_set_xattn(1);
-        else if (!strcmp(argv[i], "--no_spatial"))    model_set_no_spatial(1);
+        else if (!strcmp(argv[i], "--spatial"))       model_set_no_spatial(0);  /* ckpt trained with spatial blocks */
+        else if (!strcmp(argv[i], "--no_spatial"))    model_set_no_spatial(1);  /* legacy: now the default */
         else if (!strcmp(argv[i], "--posenc"))        model_set_posenc(1);
         else if (!strcmp(argv[i], "--pool=last"))     model_set_pool_last(1);
         else if (!strcmp(argv[i], "--prenorm"))       nn_set_prenorm(1);
         else if (!strcmp(argv[i], "--timebias"))      nn_set_timebias(1);
         else if (!strcmp(argv[i], "--co_spatial"))  { model_set_co_spatial(1); co_spatial = 1; }
     }
-    Config c = checkpoint_load_config(weights);      /* dimensions come from the checkpoint, not the CLI */
-    printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d\n",
-           weights, c.d_model, c.n_layers, c.n_heads, c.d_ff);
+    /* --weights=a.ckpt,b.ckpt,... loads an ENSEMBLE: predictions are averaged
+     * in normalized coordinate space before scoring. Every member must share
+     * the same Config (checked) and — for honest numbers — the same split and
+     * normalization stats (train members with the same --split_seed and
+     * different --seed values; stats are taken from the FIRST member). */
+    #define MAX_ENS 16
+    char wbuf[4096]; strncpy(wbuf, weights, sizeof wbuf - 1); wbuf[sizeof wbuf - 1] = 0;
+    const char *wlist[MAX_ENS]; int K = 0;
+    for (char *tok = strtok(wbuf, ","); tok && K < MAX_ENS; tok = strtok(NULL, ","))
+        wlist[K++] = tok;
+    if (K == 0) { fprintf(stderr, "eval: empty --weights\n"); return 1; }
+
+    Config c = checkpoint_load_config(wlist[0]);     /* dimensions come from the checkpoint, not the CLI */
+    printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d%s\n",
+           wlist[0], c.d_model, c.n_layers, c.n_heads, c.d_ff,
+           K > 1 ? " (ensemble)" : "");
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     if (bin && ds.d_text != c.d_text) { die("d_text mismatch (data %d vs model %d)", ds.d_text, c.d_text); }
 
     ds.no_text = no_text;
-    /* Infer whether the checkpoint was trained with --motion by comparing widths:
-     * motion adds exactly 4 numeric features, so d_num==ds.d_num+4 means we must
-     * re-add motion here to match the model the weights expect. */
-    if (!ds.prewindowed && c.d_num == ds.d_num + 4) dataset_add_motion(&ds);  /* ckpt trained --motion */
+    apply_feature_aug(&ds, c.d_num);                /* re-apply the ckpt's --motion/--physics (width arithmetic) */
     if (co_spatial) dataset_build_neighbors(&ds);
-    apply_ckpt_stats(&ds, weights);                  /* reuse the checkpoint's train-only normalization */
-    ParamList pl; plist_init(&pl);
-    Model m = model_new(&c, &pl);
-    checkpoint_load_params(weights, &pl);            /* fill the model with the saved weights */
-    Eval e = evaluate(&m, &ds, NULL, ds.n_samples);  /* idx==NULL => score samples 0..n_samples-1 */
-    printf("eval on %d samples | MAE %.4f | dR %.2f km  (persistence %.2f km)\n",
-           ds.n_samples, e.mmae, e.mkm, e.mbase);
+    apply_ckpt_stats(&ds, wlist[0]);                 /* reuse the checkpoint's train-only normalization */
+    ParamList pls[MAX_ENS]; Model msv[MAX_ENS]; Model *mps[MAX_ENS];
+    for (int k = 0; k < K; ++k) {
+        if (k > 0) {                                 /* members must be architecturally identical */
+            Config ck = checkpoint_load_config(wlist[k]);
+            if (memcmp(&ck, &c, sizeof(Config)) != 0)
+                die("ensemble member %s: config mismatch vs %s", wlist[k], wlist[0]);
+        }
+        plist_init(&pls[k]);
+        msv[k] = model_new(&c, &pls[k]);
+        checkpoint_load_params(wlist[k], &pls[k]);   /* fill each member with its saved weights */
+        mps[k] = &msv[k];
+    }
+    /* Optional eval sharding: a replica pool (same architecture — the model_set_*
+     * flags above are already in effect) lets evaluate() split the samples
+     * across cores. Single-model path only; the ensemble path runs serial. */
+    /* Restrict scoring to one side of the storm-level split, if requested. */
+    Split sp; memset(&sp, 0, sizeof sp);
+    const int *eidx = NULL; int en = ds.n_samples;
+    if (split_which >= 0) {
+        sp = dataset_split3(&ds, 0.15f, 0.15f, split_seed);
+        if      (split_which == 2) { eidx = sp.test;  en = sp.n_test; }
+        else if (split_which == 1) { eidx = sp.val;   en = sp.n_val; }
+        else                       { eidx = sp.train; en = sp.n_train; }
+        printf("scoring the %s split only (split_seed=%lu): %d samples\n",
+               split_which == 2 ? "TEST" : split_which == 1 ? "VAL" : "TRAIN", split_seed, en);
+    }
+    ParTrainer *ept = (threads > 1 && K == 1) ? partrainer_new(&c, threads) : NULL;
+    Eval e;
+    if (K == 1) {
+        e = evaluate(&msv[0], &pls[0], ept, &ds, eidx, en);  /* idx==NULL => samples 0..n-1 */
+    } else {
+        nn_set_training(0);
+        int H = ds.pred_len < MAXH ? ds.pred_len : MAXH;
+        memset(&e, 0, sizeof e); e.H = H;
+        eval_span(mps, K, &ds, eidx, 0, en, H, e.mae, e.km, e.base_km);
+        for (int h = 0; h < H; ++h) {
+            e.mae[h] /= en; e.km[h] /= en; e.base_km[h] /= en;
+            e.mmae += e.mae[h]; e.mkm += e.km[h]; e.mbase += e.base_km[h];
+        }
+        e.mmae /= H; e.mkm /= H; e.mbase /= H;
+    }
+    printf("eval on %d samples%s | MAE %.4f | dR %.2f km  (persistence %.2f km)\n",
+           en, K > 1 ? " (ensemble mean)" : "", e.mmae, e.mkm, e.mbase);
     print_horizons(&e);
 
-    model_free(&m); plist_free(&pl); dataset_free(&ds);
+    if (ept) partrainer_free(ept);
+    if (split_which >= 0) split_free(&sp);
+    for (int k = 0; k < K; ++k) { model_free(&msv[k]); plist_free(&pls[k]); }
+    dataset_free(&ds);
     return 0;
 }
 
@@ -571,7 +721,7 @@ static int cmd_predict(int argc, char **argv) {
     }
     Config c = checkpoint_load_config(weights);
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
-    if (!ds.prewindowed && c.d_num == ds.d_num + 4) dataset_add_motion(&ds);   /* ckpt trained --motion (infer from width) */
+    apply_feature_aug(&ds, c.d_num);                 /* re-apply the ckpt's --motion/--physics (width arithmetic) */
     apply_ckpt_stats(&ds, weights);                  /* reproduce train-time normalization */
     ParamList pl; plist_init(&pl);
     Model m = model_new(&c, &pl);
@@ -649,6 +799,7 @@ static int cmd_bench(int argc, char **argv) {
     int full = 0, iters = 200, d_model = -1, d_ff = -1, n_layers = -1, pred_len = -1;   /* iters = timed repetitions */
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--full"))           full = 1;
+        else if (!strcmp(argv[i], "--spatial"))        model_set_no_spatial(0);  /* bench the paper-faithful encoder */
         else if (!strncmp(argv[i], "--iters=", 8))     iters = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--d_model=", 10))  d_model = atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--d_ff=", 7))      d_ff = atoi(argv[i] + 7);

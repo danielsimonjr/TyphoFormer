@@ -17,6 +17,15 @@ ifeq ($(NATIVE),1)
 CFLAGS  += -march=native -funroll-loops
 endif
 
+# Portable SIMD tier between plain -O3 and NATIVE:  make MARCH=x86-64-v3
+# (x86-64-v3 = AVX2+FMA, runs on any x86-64 CPU from ~2015 on; use any -march
+# value your toolchain accepts). Ignored when NATIVE=1 is set.
+ifneq ($(MARCH),)
+ifneq ($(NATIVE),1)
+CFLAGS  += -march=$(MARCH)
+endif
+endif
+
 # Sanitizer build for tests:  make SAN=1 test
 ifeq ($(SAN),1)
 CFLAGS  += -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer

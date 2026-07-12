@@ -114,6 +114,13 @@ void  split_free(Split *s);
  * carries no coordinate history). */
 void dataset_add_motion(Dataset *d);
 
+/* Append 7 second-order physics features: acceleration (Δ²lat, Δ²lon),
+ * translation speed |v|, the heading unit vector (v/|v|), and the seasonal
+ * day-of-year phase (sin, cos). Increases d->d_num by 7; composes with
+ * dataset_add_motion (apply motion first, then physics: +11 total). Call
+ * BEFORE dataset_standardize. No-op for the .tfb path. */
+void dataset_add_physics(Dataset *d);
+
 /* Precompute co-active neighbours (call after load, before use). Accessor fills
  * nbrmat[TF_NBR_K, TF_NBR_NF] and *cnt for sample s's seed timestep. */
 void dataset_build_neighbors(Dataset *d);

@@ -42,6 +42,12 @@ int  partrainer_workers(const ParTrainer *pt);
  * step, before dispatching the batch). */
 void partrainer_broadcast(ParTrainer *pt, const ParamList *master);
 
+/* Direct access to replica i's Model (0 <= i < partrainer_workers). Lets the
+ * driver reuse the replica pool for sharded EVALUATION: broadcast the master
+ * weights, then run each replica over its own slice of the eval set on its own
+ * thread (each replica owns all its scratch, so this is race-free). */
+Model *partrainer_model(ParTrainer *pt, int i);
+
 /* Run one minibatch: samples idx[b .. b+bs) are distributed across the workers,
  * each accumulating raw gradients into its replica. The per-sample gradients are
  * summed and scaled by 1/bs into `master->g` (master is zeroed internally).

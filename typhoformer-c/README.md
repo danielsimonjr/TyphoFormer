@@ -73,7 +73,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | Command | Purpose | Example |
 |:--|:--|:--|
 | `train`    | Train; writes a checkpoint (config header + normalization stats). | `./typhoformer train 30 --full --save=m.ckpt` |
-| `eval`     | Load a checkpoint and evaluate (MAE + spherical-distance ΔR, per horizon). | `./typhoformer eval --weights=m.ckpt` |
+| `eval`     | Load a checkpoint — or a comma-separated **ensemble**, predictions averaged — and evaluate (MAE + spherical ΔR, per horizon). `--split=test --split_seed=S` re-derives the training partition and scores only the held-out storms; `--threads=N` shards eval across cores. | `./typhoformer eval --weights=a.ckpt,b.ckpt --split=test --split_seed=5` |
 | `prepare`  | Build sliding-window samples from CSV + embeddings and write a `.tfb`. | `./typhoformer prepare --out=data.tfb` |
 | `predict`  | Write predicted vs. true tracks (with per-step error) to CSV. | `./typhoformer predict --weights=m.ckpt --n=50 --out=pred.csv` |
 | `baseline` | Report persistence and constant-velocity (CLIPER-style) baselines. | `./typhoformer baseline --pred_len=4` |
@@ -97,12 +97,15 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
+| `--physics` | **Second-order physics features**: acceleration (Δ²lat, Δ²lon), translation speed, heading unit vector, and seasonal day-of-year phase (sin/cos). Composes with `--motion` (+7 features). | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
 | `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Supersedes `--delta`. | off |
 | `--gru` | Constant-velocity decoder whose curvature correction is produced by a **GRU** with hidden state carried across the rollout (initialised from the encoder context) — gives the multi-step rollout real memory. | off |
 | `--xattn` | Constant-velocity decoder whose per-step context comes from **cross-attention over the encoder's full sequence** (not the pooled vector). | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
-| `--no_spatial` | Drop the degenerate N=1 spatial encoder blocks (their Q/K never train). | off |
+| `--huber=` | **Huber loss** with transition point δ on the normalized residual (quadratic core = MSE, linear tails) — tempers fast-moving outlier storms. 0 = plain MSE. | 0 |
+| `--hweight=` | **Horizon-weighted loss**: forecast step h weighted `(h+1)^γ` (mean-normalized) — γ>0 upweights the long horizons that dominate the km error. 0 = uniform. | 0 |
+| `--spatial` | Restore the paper's N=1 spatial encoder blocks. They are **off by default** (their Q/K never train and dropping them is accuracy-neutral — FINDINGS §7 — for ~2× less encoder compute); required to load checkpoints trained before the default changed. `--no_spatial` is accepted as a no-op. | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
 | `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |
 | `--prenorm` | Pre-norm transformer blocks (LN before each sublayer) instead of post-norm. | off |
@@ -228,6 +231,7 @@ See [`backends/README.md`](backends/README.md).
 | `make test-valgrind` | Run the whole test suite under **valgrind** (memcheck + leak-check). |
 | `make OPENCL=1 test-opencl` | Build the model on the **OpenCL** backend and verify it (kernels vs CPU + full-model gradient check). Needs an OpenCL ICD (`pocl-opencl-icd` for CPU). |
 | `make NATIVE=1` | Build with `-march=native -funroll-loops` (faster, non-portable binary). |
+| `make MARCH=x86-64-v3` | Portable SIMD tier between plain `-O3` and NATIVE (AVX2+FMA; runs on any x86-64 CPU from ~2015 on). |
 | `make -C backends/cuda` | Compile the **CUDA** backend with `nvcc` → `libtyphoformer_cuda.a`. |
 | `make clean` | Remove build artifacts. |
 
