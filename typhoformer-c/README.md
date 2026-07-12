@@ -98,30 +98,28 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
 | `--delta` | **Displacement head**: the decoder predicts the change from the seed (`ŷ_t = ŷ_{t-1} + Δ`, fc2 zero-init → starts at persistence, learns the correction). | off |
-| `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Serial path only (`--threads=1`); supersedes `--delta`. | off |
-| `--gru` | Constant-velocity decoder whose curvature correction is produced by a **GRU** with hidden state carried across the rollout (initialised from the encoder context) — gives the multi-step rollout real memory. Serial path only. | off |
-| `--xattn` | Constant-velocity decoder whose per-step context comes from **cross-attention over the encoder's full sequence** (not the pooled vector). Serial path only. | off |
+| `--cv` | **Constant-velocity decoder** (2nd-order delta): anchors the rollout at constant-velocity extrapolation (`ŷ_t = y_{t-1} + v + fc2(...)`, v threaded across steps, fc2 zero-init) so an untrained model starts *at the CLIPER baseline* and learns only curvature. Supersedes `--delta`. | off |
+| `--gru` | Constant-velocity decoder whose curvature correction is produced by a **GRU** with hidden state carried across the rollout (initialised from the encoder context) — gives the multi-step rollout real memory. | off |
+| `--xattn` | Constant-velocity decoder whose per-step context comes from **cross-attention over the encoder's full sequence** (not the pooled vector). | off |
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
 | `--no_spatial` | Drop the degenerate N=1 spatial encoder blocks (their Q/K never train). | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
 | `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |
 | `--prenorm` | Pre-norm transformer blocks (LN before each sublayer) instead of post-norm. | off |
 | `--timebias` | ALiBi-style temporal-distance bias in the temporal attention (`score[i,j] −= slopeₕ·\|i−j\|`) — a parameter-free sense of recency. | off |
-| `--co_spatial` | **Real** multi-node spatial attention: the encoded context attends over the relative states of storms active at the same timestep. Serial path only (`--threads=1`). | off |
+| `--co_spatial` | **Real** multi-node spatial attention: the encoded context attends over the relative states of storms active at the same timestep. | off |
 | `--no_text` | **Ablation**: zero the language-embedding branch (numbers-only model). | off |
 | `--split_seed=` | Seed for the storm-level train/val/test partition (vary for a variance estimate). | 42 |
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. | repo defaults |
 
-**For accuracy, train with `--motion --cv`** (serial path, `--threads=1`): motion
-features give the model the trajectory signal, and the constant-velocity anchor
-lets it start at CLIPER and learn only the curvature — held-out ΔR ~40.8 km at
-6h, and it beats constant-velocity at 48h (see
-[docs/FINDINGS.md](docs/FINDINGS.md) §9/§11). When you need multicore
-(`--threads=N`), use `--motion --delta` instead (~48 km): the displacement head
-starts at persistence and works on the data-parallel path. `eval`/`predict`
-auto-detect `--motion` from the checkpoint's feature count; pass `--delta`/`--cv`
-to `eval` to match the checkpoint's decoder.
+**For accuracy, train with `--motion --cv`**: motion features give the model the
+trajectory signal, and the constant-velocity anchor lets it start at CLIPER and
+learn only the curvature — held-out ΔR ~40.8 km at 6h, and it beats
+constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11). All
+decoder variants work on both the serial and the data-parallel (`--threads=N`)
+paths. `eval`/`predict` auto-detect `--motion` from the checkpoint's feature
+count; pass `--delta`/`--cv` to `eval` to match the checkpoint's decoder.
 
 `--no_text` is the key scientific control: it tests whether the GPT-4o/MiniLM
 language branch — the paper's central premise — actually helps versus a
@@ -143,6 +141,12 @@ N model replicas (one per core), gradients are summed, and the optimizer takes a
 single step. It is numerically equivalent to serial training up to
 floating-point summation order (`tests/test_parallel` pins this to ≈1e-7), and
 `--threads=1` keeps the original serial path byte-for-byte.
+
+Workers feed the same per-sample auxiliary inputs as the serial loop (seed
+velocity, co-active neighbours), so **every decoder variant (`--cv`/`--gru`/
+`--xattn`) and `--co_spatial` trains data-parallel too** — `tests/test_parallel`
+pins serial/parallel gradient equivalence for each of them on the real dataset.
+The one remaining serial-only flag is `--km_loss`.
 
 ```bash
 ./typhoformer train 30 --full --threads=8 --save=m.ckpt
@@ -241,7 +245,7 @@ The unit tests double as the correctness contract for every extension seam:
 | `test_tensor`, `test_nn`, `test_model` | forward/backward gradients match finite differences (incl. `pred_len=3`). |
 | `test_golden` | training loss is bit-stable (deterministic regression guard). |
 | `test_module` | a `Sequential` of pluggable `Module`s backprops correctly. |
-| `test_parallel` | multicore gradient == serial gradient (≈1e-7). |
+| `test_parallel` | multicore gradient == serial gradient (≈1e-7), incl. the cv/gru/xattn/co_spatial variants on the real dataset. |
 | `test_checkpoint`, `test_npy` | checkpoint round-trip (TFW1/2/3 + optimizer sidecar), `.npy` dtype/fortran validation, storm-safe split. |
 | `test_dropout` | dropout is identity at eval; its backward (pinned-mask) gradient-checks. |
 | `backends/opencl/test_opencl` | OpenCL kernels match the CPU reference (float-rounding level); model runs through OpenCL. |
