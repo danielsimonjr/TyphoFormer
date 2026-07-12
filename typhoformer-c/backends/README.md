@@ -13,8 +13,9 @@ pointwise: mat_relu  mat_sigmoid
 scalar:    mat_scale  mat_axpy
 ```
 
-The default build uses `src/tensor.c` — a portable, cache-blocked **CPU
-backend** (standard library only). To retarget the model to another device,
+The default build uses `src/tensor.c` — a portable, cache-aware **CPU
+backend** (standard library only; loop-ordered accumulation plus an unrolled
+8-accumulator dot product that auto-vectorizes at `-O3`). To retarget the model to another device,
 implement the same functions and link that translation unit *instead of*
 `src/tensor.c`. No layer code changes, because every layer (`src/nn.c`,
 `src/model.c`) is written purely in terms of these calls.
@@ -46,8 +47,10 @@ sudo apt-get install pocl-opencl-icd ocl-icd-opencl-dev opencl-headers   # CPU O
 make OPENCL=1 test-opencl        # cross-check kernels, then gradient-check the whole model
 ```
 
-Verified: every kernel matches the CPU reference to ≤1.2e-7, and the full-model
-finite-difference gradient check passes *through OpenCL* at `pred_len` 1 and 3.
+Verified: every kernel matches the CPU reference at the float-rounding level
+(test tolerance 1e-4; observed worst ~1e-7 — the exact figure shifts with the
+CPU kernel's summation order), and the full-model finite-difference gradient
+check passes *through OpenCL* at `pred_len` 1 and 3.
 
 ## `cuda/` — device-resident GPU reference
 

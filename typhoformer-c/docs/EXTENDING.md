@@ -177,20 +177,24 @@ reference, then extend or vary it.)
 3. Implement pre-norm blocks and compare training stability.
    ✓ *Done — and it matters most:* `--motion` (position+velocity inputs) and
    `--delta` (displacement decoder) took held-out ΔR 128→48 km. Try extending
-   motion with acceleration (Δ²), or predicting the residual over the
-   constant-velocity extrapolation instead of over the seed.
+   motion with acceleration (Δ²). (Predicting the residual over the
+   constant-velocity extrapolation is now done too — `--cv`, FINDINGS §9 —
+   and beats CLIPER at 48h, FINDINGS §11.)
 4. ✓ *Done:* normalization stats in the checkpoint ([INTEGRATION.md](INTEGRATION.md)
    §3). Extend it to per-storm normalization and gradient-check nothing breaks.
 5. ✓ *Done:* multi-step autoregressive backprop (`decoder_backward`). Add
    teacher forcing as a training-time option and compare.
 6. Add a **tiled/blocked matmul** in a new backend file (§6b) and benchmark cache
-   behavior vs. the current `ikj`/`pij` kernels with `bench`.
+   behavior vs. the current kernels (`ikj`/`pij` accumulation orders; an
+   8-accumulator unrolled dot product in `mat_matmul_bt`) with `bench`.
 7. ✓ *Done:* multicore data-parallel training (§6c). Extend it to gradient
    **accumulation** across microbatches, or a persistent thread pool, and confirm
    `test_parallel` still holds.
 8. Write a new **backend** (SIMD-intrinsics or GPU) behind §6b's contract.
-9. Add a new **Module** (a GRU decoder, a graph-attention spatial block) behind
-   §6a and plug it into a `Sequential`.
+9. Add a new **Module** behind §6a and plug it into a `Sequential`. (A GRU
+   decoder and decoder cross-attention exist now as `--gru`/`--xattn` — neither
+   survived the five-split re-test, FINDINGS §11 — so pick something new, e.g.
+   a graph-attention spatial block.)
 
 Each is a self-contained, gradient-checkable change. Start from the module
 pattern in §1 (or the matching seam in §6) and let the tests be your guide.

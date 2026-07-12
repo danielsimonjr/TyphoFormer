@@ -14,6 +14,7 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 - [ ] **Multicore support for the serial-only paths.** `--cv`, `--gru`, `--xattn`, and `--co_spatial` require `--threads=1`; extend `parallel.c` replica setup to cover the decoder variants and co-active spatial attention.
 - [ ] **Run-verify the CUDA backend on a real GPU.** It compiles with `nvcc` (CI compile-checks it) but, unlike OpenCL (verified end-to-end via POCL), has never been executed against the kernel cross-check and gradient tests.
 - [ ] **Build and test on Windows.** The data loader has a `FindFirstFile` branch written but only the POSIX (`scandir`) branch has ever been compiled.
+- [ ] **Extend the unrolled-reduction treatment to the attention kernels.** `mat_matmul_bt` got the 8-accumulator dot product (5.6× forward); the MHA per-head score/context loops and the xattn step loops still use single-accumulator reductions. Small share of runtime at `in_len=12`, but worth it for long input windows.
 - [ ] **Record the decoder variant in the checkpoint.** `eval`/`predict` auto-detect `--motion` from the checkpoint's feature count, but `--delta` (and the `--cv`/`--gru`/`--xattn` variants) must be re-specified by hand to match the checkpoint — store it in the TFW header instead.
 
 ## Conventions for this file
