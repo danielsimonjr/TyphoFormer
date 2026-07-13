@@ -55,6 +55,7 @@ static int check_model(const char *label, int pred_len) {
     for (int i = 0; i < c.in_len * c.d_text; ++i) xtext.data[i] = nn_uniform(-1, 1);
     for (int i = 0; i < c.out_dim; ++i)           yprev.data[i] = nn_uniform(-1, 1);
     for (int i = 0; i < c.pred_len * c.out_dim; ++i) Y.data[i]  = nn_uniform(-1, 1);
+    model_set_teacher(&M, Y);   /* teacher targets (consumed only by the tf-forced variant) */
 
     Mat dpred = mat_new(c.pred_len, c.out_dim), dgate = mat_new(c.in_len, c.d_model);
     model_forward(&M, xnum, xtext, yprev);
@@ -111,6 +112,13 @@ int main(void) {
     fail |= check_model("cv+rotframe", 1);
     fail |= check_model("cv+rotframe+multistep", 3);
     model_set_rotframe(0);
+    /* teacher forcing with prob 1: every rollout step's state is replaced by
+     * the (constant) teacher target, so the stochastic path is deterministic
+     * and the recurrence-cutting backward FD-checks exactly. training must be
+     * on for the path to arm; dropout off keeps the check deterministic. */
+    nn_set_dropout(0.0f); nn_set_training(1); model_set_tf_prob(1.0f);
+    fail |= check_model("cv+teacher-forced", 3);
+    model_set_tf_prob(0.0f); nn_set_training(0); nn_set_dropout(0.1f);
     model_set_cv(0);
     model_set_gru(1);
     fail |= check_model("gru", 1);

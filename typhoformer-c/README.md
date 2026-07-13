@@ -106,6 +106,9 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--km_loss` | Weight the longitude error by `cos²(lat)` (km-aware objective). Tested; did **not** help — off by default. | off |
 | `--huber=` | **Huber loss** with transition point δ on the normalized residual (quadratic core = MSE, linear tails) — tempers fast-moving outlier storms. 0 = plain MSE. | 0 |
 | `--hweight=` | **Horizon-weighted loss**: forecast step h weighted `(h+1)^γ` (mean-normalized) — γ>0 upweights the long horizons that dominate the km error. 0 = uniform. | 0 |
+| `--tf=` | **Teacher forcing** on the cv rollout: each training step's output state is replaced by ground truth with a probability annealed 1→0 over E epochs (recurrence gradient cut at forced steps; eval always autoregressive). | 0 |
+| `--no_lon` | **Ablation**: zero `--motion`'s absolute-longitude column (keeps d_num/checkpoint layout; pass to `eval` too). Tests climatology-signal vs memorization. | off |
+| `--defer_dw` | Deferred per-batch dW GEMMs instead of per-sample accumulation. Bit-identical math; measured **neutral** on the reference 4-core box (backward is compute-bound at these sizes) — kept for hardware where gradients exceed the last-level cache. | off |
 | `--spatial` | Restore the paper's N=1 spatial encoder blocks. They are **off by default** (their Q/K never train and dropping them is accuracy-neutral — FINDINGS §7 — for ~2× less encoder compute); required to load checkpoints trained before the default changed. `--no_spatial` is accepted as a no-op. | off |
 | `--posenc` | Learned positional encoding after `input_proj` — makes temporal attention order-aware. | off |
 | `--pool=last` | Pool the encoder by the last time step instead of the learned TimeMix average. | off |
@@ -117,12 +120,14 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. `--emb=none` = **text-free mode**: the language branch is fed zeros (== `--no_text`), so CSVs converted from raw HURDAT2 train without any embeddings. | repo defaults |
 
-**For accuracy, train with `--motion --physics --cv`**: motion features give the
-model the trajectory signal, the physics features add the curvature signal
-(heading, acceleration, seasonal phase — better on all five test splits), and
-the constant-velocity anchor lets it start at CLIPER and learn only the
-correction — held-out ΔR ~39.1 km at 6h, and the cv decoder beats
-constant-velocity at 48h (see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13).
+**For accuracy, train with `--motion --physics --cv --huber=0.1`** (the
+best-known recipe at both horizons): motion features give the model the
+trajectory signal, the physics features add the curvature signal (heading,
+acceleration, seasonal phase — better on all five test splits), the
+constant-velocity anchor lets it start at CLIPER and learn only the
+correction, and the Huber loss tames outlier storms — held-out ΔR
+**38.5 km at 6h (under the ~39.4 km CLIPER bar)** and best-known at 48h
+(see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13/§14).
 All decoder variants work on both the serial and the data-parallel
 (`--threads=N`) paths. `eval`/`predict` auto-detect `--motion`/`--physics` from
 the checkpoint's feature count; pass `--delta`/`--cv` to `eval` to match the
@@ -296,6 +301,7 @@ Held-out test ΔR across 5 storm splits (compact config). The honest bar is
 | `--motion --delta --no_text` (numbers only) | 46.7 ± 4.8 km | 2.6× better |
 | **`--motion --cv`** (constant-velocity decoder) | **40.8 km** | **reaches CLIPER (~39 km)** |
 | **`--motion --physics --cv`** (+ heading/accel/season; no-spatial default) | **39.1 km** | **on CLIPER; better on 5/5 splits** |
+| **`--motion --physics --cv --huber=0.1`** (the recipe) | **38.5 km** | **under CLIPER (~39.4 km); best-known at 48h too** |
 
 `--cv` anchors the decoder at constant-velocity extrapolation and learns only the
 curvature — the first architectural change that reaches the constant-velocity

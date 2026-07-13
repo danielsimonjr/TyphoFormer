@@ -63,10 +63,23 @@ static void dropout_apply(Mat m, Mat mask, float p) {
 }
 /* Dropout is active only while training AND p>0; otherwise it is the identity. */
 static int dropout_on(void) { return g_training && g_dropout > 0.0f; }
+/* Public draw from the thread-local training RNG (shared with the dropout mask
+ * stream — one decorrelated stochastic stream per worker). Used by the decoder
+ * for per-step teacher-forcing decisions. */
+float nn_dropout_draw(void) { return drop_uniform(); }
 
 /* ---- pre-norm vs post-norm block ------------------------------------ */
 static int g_prenorm = 0;
 void nn_set_prenorm(int on) { g_prenorm = on; }
+
+/* ---- deferred weight-gradient accumulation --------------------------- */
+/* See nn.h. Plain global read during forward/backward; the trainer sets it
+ * once before training starts (before any worker threads run), so there is
+ * no race. Default off keeps every gradient-check test and the golden loop
+ * on the immediate (original) path. */
+static int g_defer = 0;
+void nn_set_defer_grads(int on) { g_defer = on; }
+int  nn_defer_grads(void) { return g_defer; }
 
 /* ---- ALiBi temporal-distance bias ----------------------------------- */
 static int g_timebias = 0;
@@ -137,6 +150,9 @@ Linear linear_new(int in, int out, ParamList *pl, const char *name) {
     l.b = (float *)calloc(out, sizeof(float));
     l.db = (float *)calloc(out, sizeof(float));
     l.xcache = (Mat){0, 0, NULL};
+    l.st_x = (Mat){0, 0, NULL}; l.st_dy = (Mat){0, 0, NULL};
+    l.st_n = l.st_cap = 0;
+    l.s_dWtmp = (Mat){0, 0, NULL};
     /* Kaiming-style uniform init matching PyTorch's nn.Linear default: both W
      * and b are drawn from U(-k, k) with k = 1/sqrt(fan_in). Sampling order
      * (all of W, then b) is part of the golden-regression contract. */
@@ -171,25 +187,68 @@ void linear_backward(Linear *l, const Mat dy, Mat dx) {
     const Mat x = l->xcache;
     const int T = dy.rows, out = l->out, in = l->in;
     assert(dy.cols == out && x.rows == T);
-    for (int p = 0; p < T; ++p) {                   /* dW += dy^T @ x (pij) */
-        const float *dyr = &dy.data[p * out];
-        const float *xr  = &x.data[p * in];
-        for (int i = 0; i < out; ++i) {
-            const float a = dyr[i];
-            float *dWr = &l->dW.data[i * in];
-            for (int j = 0; j < in; ++j) dWr[j] += a * xr[j];
+    if (g_defer) {
+        /* Deferred path: append this call's (x, dy) rows to the stash instead
+         * of touching dW/db — the whole batch becomes one GEMM in
+         * linear_flush. The stash grows geometrically and persists (no
+         * steady-state allocation). dx is still computed immediately below,
+         * because the caller's backward chain needs it now. */
+        if (l->st_n + T > l->st_cap) {
+            int cap = l->st_cap ? l->st_cap : 32;
+            while (cap < l->st_n + T) cap *= 2;
+            Mat nx = mat_new(cap, in), ndy = mat_new(cap, out);
+            if (l->st_n) {
+                memcpy(nx.data,  l->st_x.data,  (size_t)l->st_n * in  * sizeof(float));
+                memcpy(ndy.data, l->st_dy.data, (size_t)l->st_n * out * sizeof(float));
+            }
+            mat_free(&l->st_x); mat_free(&l->st_dy);
+            l->st_x = nx; l->st_dy = ndy; l->st_cap = cap;
         }
-    }
-    /* db += colsum(dy), accumulated row-by-row: the p-outer/i-inner order walks
-     * dy contiguously and updates db[i] with independent adds (vectorizable),
-     * instead of a strided single-accumulator reduction per column. */
-    for (int p = 0; p < T; ++p) {
-        const float *restrict dyr = &dy.data[p * out];
-        for (int i = 0; i < out; ++i) l->db[i] += dyr[i];
+        memcpy(&l->st_x.data[(size_t)l->st_n * in],  x.data,  (size_t)T * in  * sizeof(float));
+        memcpy(&l->st_dy.data[(size_t)l->st_n * out], dy.data, (size_t)T * out * sizeof(float));
+        l->st_n += T;
+    } else {
+        for (int p = 0; p < T; ++p) {               /* dW += dy^T @ x (pij) */
+            const float *dyr = &dy.data[p * out];
+            const float *xr  = &x.data[p * in];
+            for (int i = 0; i < out; ++i) {
+                const float a = dyr[i];
+                float *dWr = &l->dW.data[i * in];
+                for (int j = 0; j < in; ++j) dWr[j] += a * xr[j];
+            }
+        }
+        /* db += colsum(dy), accumulated row-by-row: the p-outer/i-inner order
+         * walks dy contiguously and updates db[i] with independent adds
+         * (vectorizable), instead of a strided reduction per column. */
+        for (int p = 0; p < T; ++p) {
+            const float *restrict dyr = &dy.data[p * out];
+            for (int i = 0; i < out; ++i) l->db[i] += dyr[i];
+        }
     }
     if (dx.data) mat_matmul(dy, l->W, dx);          /* dx = dy @ W (overwrites dx) */
 }
-void linear_free(Linear *l) { mat_free(&l->W); mat_free(&l->dW); free(l->b); free(l->db); mat_free(&l->xcache); }
+
+/* Flush the deferred stash: dW += st_dyᵀ · st_x as ONE [st_n]-row GEMM (via
+ * the existing atb kernel into scratch, then an axpy — no new backend kernel
+ * needed), db += column sums of st_dy. Idempotent: resets st_n to 0. */
+void linear_flush(Linear *l) {
+    if (l->st_n == 0) return;
+    const int in = l->in, out = l->out;
+    Mat sx  = { l->st_n, in,  l->st_x.data };       /* filled prefix of the stash */
+    Mat sdy = { l->st_n, out, l->st_dy.data };
+    ensure(&l->s_dWtmp, out, in);
+    mat_matmul_atb(sdy, sx, l->s_dWtmp);            /* dyᵀ·x over the whole batch */
+    mat_axpy(l->dW, 1.0f, l->s_dWtmp);
+    for (int p = 0; p < l->st_n; ++p) {
+        const float *restrict dyr = &sdy.data[p * out];
+        for (int i = 0; i < out; ++i) l->db[i] += dyr[i];
+    }
+    l->st_n = 0;
+}
+void linear_free(Linear *l) {
+    mat_free(&l->W); mat_free(&l->dW); free(l->b); free(l->db); mat_free(&l->xcache);
+    mat_free(&l->st_x); mat_free(&l->st_dy); mat_free(&l->s_dWtmp);
+}
 
 /* ---- LayerNorm ------------------------------------------------------- */
 LayerNorm layernorm_new(int dim, ParamList *pl, const char *name) {
@@ -299,6 +358,7 @@ void ffn_backward(FFN *ff, const Mat dy, Mat dx) {
     for (int i = 0; i < T * ff->f; ++i) dh.data[i] = (ff->h.data[i] > 0.0f) ? da.data[i] : 0.0f;
     linear_backward(&ff->fc1, dh, dx);
 }
+void ffn_flush(FFN *ff) { linear_flush(&ff->fc1); linear_flush(&ff->fc2); }
 void ffn_free(FFN *ff) {
     linear_free(&ff->fc1); linear_free(&ff->fc2);
     mat_free(&ff->h); mat_free(&ff->a); mat_free(&ff->s_da); mat_free(&ff->s_dh);
@@ -399,6 +459,7 @@ void gru_backward(GRU *g, int step, const Mat dh, Mat dx, Mat dhprev) {
     if (dhprev.data) for (int i = 0; i < H; ++i) dhprev.data[i] = dhp_acc[i];  /* export cross-step grad */
     if (dhp_acc != dhp) free(dhp_acc);
 }
+void gru_flush(GRU *g) { linear_flush(&g->lr); linear_flush(&g->lu); linear_flush(&g->ln); }
 void gru_free(GRU *g) {
     linear_free(&g->lr); linear_free(&g->lu); linear_free(&g->ln);
     for (int s = 0; s < g->max_steps; ++s) {
@@ -520,6 +581,9 @@ void xattn_backward_memory(CrossAttn *a, Mat dmem) {
     Mat tmp = { T, D, a->s_dctx.data };
     linear_backward(&a->lv, a->s_dV, tmp);        /* dV -> tmp */
     if (dmem.data) for (int i = 0; i < T * D; ++i) dmem.data[i] += tmp.data[i];   /* dmem += lv path */
+}
+void xattn_flush(CrossAttn *a) {
+    linear_flush(&a->lq); linear_flush(&a->lk); linear_flush(&a->lv); linear_flush(&a->lo);
 }
 void xattn_free(CrossAttn *a) {
     linear_free(&a->lq); linear_free(&a->lk); linear_free(&a->lv); linear_free(&a->lo);
@@ -731,6 +795,9 @@ void mha_backward(MHA *m, const Mat dy, Mat dx) {
     linear_backward(&m->v, dV, dx);          /* dx starts as v's contribution (overwrite) */
     for (int i = 0; i < S * D; ++i) dx.data[i] += dxq.data[i] + dxk.data[i];   /* + q and k paths */
 }
+void mha_flush(MHA *m) {
+    linear_flush(&m->q); linear_flush(&m->k); linear_flush(&m->v); linear_flush(&m->o);
+}
 void mha_free(MHA *m) {
     linear_free(&m->q); linear_free(&m->k); linear_free(&m->v); linear_free(&m->o);
     mat_free(&m->Q); mat_free(&m->K); mat_free(&m->V); mat_free(&m->Ocat);
@@ -819,6 +886,7 @@ void block_backward(Block *b, const Mat dy, Mat dx) {
     else        mha_backward(&b->attn, dr1, dtmp);
     for (int i = 0; i < S * D; ++i) dx.data[i] = dr1.data[i] + dtmp.data[i];   /* attn skip + attn path */
 }
+void block_flush(Block *b) { mha_flush(&b->attn); ffn_flush(&b->ff); }
 void block_free(Block *b) {
     mha_free(&b->attn); layernorm_free(&b->ln1); layernorm_free(&b->ln2); ffn_free(&b->ff);
     mat_free(&b->attn_out); mat_free(&b->r1); mat_free(&b->y1); mat_free(&b->ff_out); mat_free(&b->r2);

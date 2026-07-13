@@ -148,12 +148,14 @@ static void *worker_run(void *arg) {
         model_set_neighbors(&w->model, w->nbr, nc);
         dataset_seed_velocity(w->ds, s, w->vel);
         model_set_seed_velocity(&w->model, w->vel);
+        model_set_teacher(&w->model, w->Y);   /* teacher targets (inert unless --tf armed the prob) */
         model_forward(&w->model, w->xn, w->xt, w->yp);
         /* raw (un-averaged) gradients; the 1/bs scale is applied at reduction */
         w->loss += model_loss(w->model.pred, w->Y, w->model.pgf.gate, w->lambda,
                               w->dpred, w->dgate);
         model_backward(&w->model, w->dpred, w->dgate);      /* accumulates into w->pl->g */
     }
+    model_flush_grads(&w->model);    /* flush deferred dW before the reduction reads grads */
     w->dseed = nn_dropout_state();   /* advance so masks differ across batches */
     return NULL;
 }
