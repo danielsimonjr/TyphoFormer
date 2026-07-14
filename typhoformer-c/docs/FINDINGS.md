@@ -611,9 +611,29 @@ none of the "promising" small-sample wiggles reappeared.
 35.2 km @ 6h and 227.9 over 6–48h — versus 38.5 and 275.3 when trained on 98
 storms. More data improved the model everywhere, exactly as every section
 since §3 predicted; it just improved the baseline's *test conditions* too.
-Remaining honest caveats: seed 3 is a 6h outlier (40.0 vs the others'
-31.6–35.5), and the hyperparameters were tuned on the small sample — a scaled
-re-tune (best epochs land early: 2–27) is the natural next pass.
+
+**The scaled re-tune: the recipe's defaults survive (48 runs).** Fifteen
+configs (lr, lr_decay, dropout, batch, weight decay, Huber δ) × splits {1, 3},
+selected on VAL, never test. The val landscape is *flat* — 30.95 to 32.06 km
+across all fifteen — with the recipe itself tied-best at 30.95. Two lessons
+inside that flatness:
+
+1. **Tuning does not transfer across dataset sizes.** Dropout 0.2, the clear
+   winner of the 98-storm search (§14), is now among the *worst* configs
+   (32.06). More data wants less regularization; re-tune when the data changes.
+2. **Val-tied challengers validated across all five splits at both horizons,
+   and neither clears the bar.** `lr_decay=0.9` gains ~1.3 km at 6h but blows
+   up on two 48h splits (288/269 vs the recipe's 213/231) — rejected.
+   `lr=2e-3 --lr_decay=0.9` shows −1.9 @ 6h / −1.3 @ 48h on means but only
+   3/5 splits each, with its largest win on the volatile split-3 test set, and
+   it did not beat the recipe on val — adopting it would be test-set
+   selection. **The defaults stand.**
+
+**The split-3 "outlier," resolved.** Three init seeds of the identical recipe
+on split 3 score 38.2 / 40.0 / 41.8 at 6h while its val barely moves
+(30.1–30.5): that split's test storms are intrinsically volatile, not
+mis-tuned — run-to-run spread on one test set can reach ±2 km even at 826
+storms. Multi-seed reporting remains mandatory.
 
 ## 16. What this means
 
