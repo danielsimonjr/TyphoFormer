@@ -1,0 +1,15 @@
+# HURDAT2 data files are PINNED PROVENANCE — git must not rewrite their bytes.
+#
+# This repo is cloned with core.autocrlf=true on Windows, so without these rules git
+# normalizes CRLF->LF on commit and re-expands on checkout. The records survive that,
+# but the files stop being byte-identical to what NOAA served, and the checked-out
+# bytes then differ per platform. For a dataset whose entire point is that a result
+# can be reproduced later (NOAA *revises* HURDAT2 between releases), the bytes are
+# the artifact. Mark them binary so git stores and restores them verbatim.
+#
+# Verify with:  sha256sum <f>  ==  git cat-file blob HEAD:<f> | sha256sum
+hurdat2_atl.txt   -text
+hurdat2_epac.txt  -text
+HURDAT_full.csv   -text
+HURDAT_atl.csv    -text
+HURDAT_epac.csv   -text
