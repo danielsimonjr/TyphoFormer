@@ -112,20 +112,43 @@ int main(void) {
     for (int i = 0; i < M; ++i) for (int j = 0; j < N; ++j) ref[i*N+j] = Bi.data[i*N+j] + bias[j];
     mat_add_bias(Bi, bias); float d8 = maxabs_diff(Bi.data, ref, n); free(ref);
 
+    /* colsum: sum each column into out[j]. Previously UNTESTED — and it is the one
+     * genuinely non-trivial reduction in the seam (the CUDA kernel does it with
+     * atomicAdd across every row of a column, the OpenCL backend keeps it on the host).
+     * A backend can pass every other op and still get this wrong, so check it. Note the
+     * reference accumulates in float, in row order, to match the kernels' precision. */
+    Mat Cs = mat_new(M, N); fill(Cs);
+    float csum[6], csum_ref[6];
+    for (int j = 0; j < N; ++j) csum_ref[j] = 0.0f;
+    for (int i = 0; i < M; ++i) for (int j = 0; j < N; ++j) csum_ref[j] += Cs.data[i*N+j];
+    mat_colsum(Cs, csum); float d9 = maxabs_diff(csum, csum_ref, N);
+
+    /* copy + zero: trivial, but they are part of the seam and a backend that keeps data
+     * device-side could plausibly botch either. Both must be EXACT (no arithmetic). */
+    Mat Cp = mat_new(M, N); fill(Cp);
+    Mat Cd = mat_new(M, N);
+    mat_copy(Cd, Cp); float d10 = maxabs_diff(Cd.data, Cp.data, n);
+    Mat Zz = mat_new(M, N); fill(Zz);
+    mat_zero(Zz);
+    float zero_ref[7 * 6] = {0};   /* M*N, all zeros */
+    float d11 = maxabs_diff(Zz.data, zero_ref, n);
+
     printf("backend kernels vs CPU reference (max abs diff):\n");
     printf("  matmul       %.2e\n  matmul_bt    %.2e\n  matmul_atb   %.2e\n", d1, d2, d3);
     printf("  relu         %.2e\n  sigmoid      %.2e\n  scale        %.2e\n", d4, d5, d6);
-    printf("  axpy         %.2e\n  add_bias     %.2e\n", d7, d8);
-    /* Reduce the eight per-op errors to a single worst case; the suite fails if ANY op
-     * exceeds TOL. `ds` holds d2..d8 (worst is seeded with d1), so the loop scans 7. */
-    float worst = d1; float ds[] = {d2,d3,d4,d5,d6,d7,d8};
-    for (int i = 0; i < 7; ++i) if (ds[i] > worst) worst = ds[i];
+    printf("  axpy         %.2e\n  add_bias     %.2e\n  colsum       %.2e\n", d7, d8, d9);
+    printf("  copy         %.2e\n  zero         %.2e\n", d10, d11);
+    /* Reduce the eleven per-op errors to a single worst case; the suite fails if ANY op
+     * exceeds TOL. `ds` holds d2..d11 (worst is seeded with d1), so the loop scans 10. */
+    float worst = d1; float ds[] = {d2,d3,d4,d5,d6,d7,d8,d9,d10,d11};
+    for (int i = 0; i < 10; ++i) if (ds[i] > worst) worst = ds[i];
     fail = worst > TOL;
-    printf("%s (worst %.2e, tol %.0e)\n", fail ? "FAIL: OpenCL kernels diverge" :
+    printf("%s (worst %.2e, tol %.0e)\n", fail ? "FAIL: backend kernels diverge" :
            "backend matches CPU reference", worst, (double)TOL);
 
     mat_free(&A); mat_free(&B); mat_free(&C); mat_free(&Bt); mat_free(&C2);
     mat_free(&Aa); mat_free(&Bb); mat_free(&C3); mat_free(&R); mat_free(&S);
     mat_free(&Sc); mat_free(&Y); mat_free(&X); mat_free(&Bi);
+    mat_free(&Cs); mat_free(&Cp); mat_free(&Cd); mat_free(&Zz);
     return fail;
 }

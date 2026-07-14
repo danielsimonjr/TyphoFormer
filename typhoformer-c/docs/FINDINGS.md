@@ -637,11 +637,12 @@ storms. Multi-seed reporting remains mandatory.
 
 ## 16. What this means
 
-- The engineering was always sound (gradient checks, golden, cross-backend
-  agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted
-  motion — and fixing it moved held-out ΔR from ~131 km to **48 km**, turning a
-  sub-persistence model into one that beats persistence 2.5× and rivals
-  constant-velocity.
+- The engineering was sound **on the platform it was tested on** (gradient
+  checks, golden, OpenCL cross-backend agreement) — but only there. §17 audits
+  the two paths CI never executed, and both were broken. The *modeling* had a
+  concrete, fixable flaw — the inputs omitted motion — and fixing it moved
+  held-out ΔR from ~131 km to **48 km**, turning a sub-persistence model into
+  one that beats persistence 2.5× and rivals constant-velocity.
 - The **language branch does not earn its keep** here, before or after the fix.
   Whether it would on a larger, harder dataset (rapid intensification, recurvature,
   extratropical transition — where text might carry signal the numbers don't) is
@@ -681,6 +682,106 @@ storms. Multi-seed reporting remains mandatory.
   **plain cv decoder** (previous bullet); extra decoder machinery just adds
   variance at this data scale.
 
+## 17. The portability audit — both untested paths were broken
+
+Two code paths had never been *executed*: the Windows build (the data loader's
+`FindFirstFile` branch carried the comment *"Untested on Windows"*) and the CUDA
+backend (CI compile-checks the `.cu`; the runners have no GPU). Running each for
+the first time broke it immediately. Neither failure is exotic; both were
+invisible to a Linux-only CI, which is the whole point of recording them here.
+
+**Windows: the RNG was 32-bit, and every weight initialized to the same value.**
+The xorshift64 state lived in `unsigned long` — 64-bit on LP64 (Linux/macOS),
+**32-bit on LLP64 (Windows)**. The seed truncated
+(`88172645463325252` → `3418323524`), `(13,7,17)` is not a full-period triple at
+32 bits, and — fatally — `nn_uniform` takes `xorshift() >> 11` and divides by
+`2^53`. With ~21 significant bits over a `2^53` denominator, **every draw
+collapses to ~0**:
+
+| `nn_uniform(-0.5, 0.5)` | as shipped | with `uint64_t` |
+|:--|:--:|:--:|
+| draw 1 | **-0.499999999986** | -0.025741013236 |
+| draw 2 | **-0.499999999935** | -0.335152426809 |
+| draw 3 | **-0.499999999931** | -0.312758417299 |
+
+Every parameter starts at the bottom of its range, so the network is born
+**perfectly symmetric** and the analytic backward cannot agree with finite
+differences: `test_nn` failed at **max rel err 9.99e-01, 72 outliers**. The build
+was clean and the losses looked plausible the whole time. The same truncation hit
+the storm-split shuffles, the per-worker dropout seeds, and an FNV multiplier
+(`0x100000001b3`, itself > 2^32).
+
+Fixed with `uint64_t` throughout. On LP64 that is a **no-op** — `unsigned long`
+*is* 64-bit there — and the proof is that `test_golden`, which pins the training
+loss bit-exactly and was pinned on Linux, now **passes on Windows**: both
+platforms generate an identical stream. The full suite is 12/12 green on
+mingw-w64, and the `FindFirstFile` branch now discovers the embedding chunks and
+trains end-to-end.
+
+**CUDA: the backend could never have run.** First execution on a Quadro P1000
+(sm_61, CUDA 12.8) segfaulted in about four seconds. `tensor_cuda.cu` made
+`Mat.data` a `cudaMalloc`'d **device** pointer, asserting that "the rest of the
+program is oblivious to where the data lives." It is not: `nn.c` and `model.c`
+dereference `Mat.data[i]` **directly in ~189 places** (weight init, loss, softmax,
+all the glue), as does the backend cross-check. The first host read of a device
+pointer dies. The backend was structurally incompatible with its own callers.
+`tensor_opencl.c` — which works — documents the opposite choice for exactly this
+reason: host-resident data, staged per call. CUDA now does the same.
+
+**Cross-backend agreement, finally measured for CUDA** (`make CUDA=1 test-cuda`,
+new; mirrors `test-opencl`):
+
+| gate | result |
+|:--|:--|
+| kernel cross-check, 11 kernels vs CPU reference | worst **1.19e-07** (tol 1e-04) |
+| tensor gradient check *through* CUDA | pass |
+| full-model gradient check *through* CUDA | **22/22 variants, 0 outliers** |
+
+**The strongest check is not a gradient check — it is the pipeline.** Gradient
+checks only prove the backward agrees with the *forward*; a self-consistently
+wrong forward passes them. So the whole program was run through CUDA
+(`train → eval → predict → baseline`, all exit 0) and compared against the CPU
+backend on the **identical command** (`./typhoformer 1`, 1 epoch, demo config):
+
+| | init val ΔR | epoch-1 loss | val ΔR | held-out test ΔR |
+|:--|:--:|:--:|:--:|:--:|
+| CPU | 2120.89 km | 0.27334 | 572.03 km | **758.86 km** |
+| CUDA | 2120.89 km | 0.27333 | 572.15 km | **759.08 km** |
+
+Agreement to ~4 significant figures across a full training epoch; the residual
+drift is 1e-07-level kernel divergence compounding over thousands of updates,
+exactly as expected. (Those absolute numbers are terrible because the demo config
+is the motion-blind model of §4 after one epoch — the GPU is faithfully
+reproducing a bad model, which is the point.)
+
+**A gap the cross-check was hiding.** Chasing those numbers revealed that the
+backend cross-check only ever tested **8 of the 13** seam functions: `mat_colsum`,
+`mat_copy` and `mat_zero` were never checked — and `colsum` is the one genuinely
+non-trivial reduction (CUDA does it with `atomicAdd` across every row of a column).
+A backend could pass every other op and still get it wrong. All three are now in
+the shared check (colsum 1.19e-07; copy and zero exact).
+
+**And a negative performance result, which is the honest headline.** This backend
+is a **correctness reference, not a speed win**. The model is tiny (`d_model=64`,
+T=12), so per-op host↔device transfer and the launch/sync overhead dominate
+completely: the GPU idles at **~7% utilisation** and the full-model gradient check
+takes **2150 s (36 min)** — against ~1 s on the CPU. An earlier version that did a
+`cudaMalloc`/`cudaFree` pair per matrix op was worse still (those cost ~1 ms
+*each*; it was still grinding after 30 minutes), fixed with a three-slot
+device-buffer pool — but pooling only removed the allocator, not the transfers.
+
+A real GPU speedup requires **device-resident** `Mat.data`, which means first
+routing those ~189 direct `.data[]` accesses through the `tensor.h` seam. Until
+then the seam is *proven* (the same model math runs unmodified on CPU, OpenCL and
+CUDA and agrees to 1e-07) but not *exploited*. This mirrors §7's lesson from the
+other direction: knowing where the time goes matters more than adding hardware.
+
+**Methodological note.** "It compiles" is not "it runs", and one platform is not
+all platforms. Both bugs sat behind green CI for the entire life of the project.
+The gates that would have caught them — a Windows build, and an *executing* CUDA
+target — now exist; only the second still cannot run in CI, for want of a GPU
+runner.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above
@@ -689,6 +790,12 @@ data-parallel — add `--threads=N` for a faster, statistically equivalent run
 (different dropout streams and summation order, same distribution).
 
 ```sh
+# §17 portability gates
+make test                                        # 12/12, also green on Windows (mingw-w64)
+make OPENCL=1 test-opencl                        # kernel cross-check + gradient checks via OpenCL
+make CUDA=1 CUDA_ARCH=sm_61 test-cuda            # same, on a real NVIDIA GPU (needs a 12.x toolkit)
+make CUDA=1 CUDA_ARCH=sm_61 typhoformer && ./typhoformer 1   # the PIPELINE through CUDA; compare to CPU
+
 # the fix, across splits
 for s in 1 2 3 4 5; do ./typhoformer train 30 --patience=8 --motion --delta --split_seed=$s; done
 # the constant-velocity decoder — reaches CLIPER (§9)
