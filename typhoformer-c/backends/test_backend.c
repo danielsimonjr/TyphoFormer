@@ -1,5 +1,5 @@
 /*
- * test_opencl.c — verify the OpenCL backend kernels produce the same numbers as
+ * test_backend.c — verify the ACTIVE backend's kernels produce the same numbers as
  * a straightforward CPU reference. Built with OPENCL=1, so mat_* here are the
  * OpenCL implementations; the reference is computed inline in plain C. Every
  * kernel is checked against random inputs to a tight tolerance.
@@ -7,6 +7,8 @@
  *   make OPENCL=1 backends/opencl/test_opencl && ./backends/opencl/test_opencl
  */
 #include "tensor.h"
+
+#include <stdint.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -16,9 +18,9 @@
  * constant so every run produces the identical inputs (reproducible pass/fail). frand
  * folds the top 53 bits into a double in [0,1), then maps to [-1,1) so test matrices
  * hold a mix of positive and negative values (important for exercising relu/sigmoid). */
-static unsigned long rng = 88172645463325252UL;
+static uint64_t rng = 88172645463325252ULL;
 static float frand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-    return (float)((rng >> 11) / (double)(1UL << 53)) * 2.0f - 1.0f; }
+    return (float)((rng >> 11) / 9007199254740992.0) * 2.0f - 1.0f; }
 
 /* Populate a matrix with frand() values. */
 static void fill(Mat m) { for (int i = 0; i < m.rows * m.cols; ++i) m.data[i] = frand(); }
@@ -110,7 +112,7 @@ int main(void) {
     for (int i = 0; i < M; ++i) for (int j = 0; j < N; ++j) ref[i*N+j] = Bi.data[i*N+j] + bias[j];
     mat_add_bias(Bi, bias); float d8 = maxabs_diff(Bi.data, ref, n); free(ref);
 
-    printf("OpenCL kernel vs CPU reference (max abs diff):\n");
+    printf("backend kernels vs CPU reference (max abs diff):\n");
     printf("  matmul       %.2e\n  matmul_bt    %.2e\n  matmul_atb   %.2e\n", d1, d2, d3);
     printf("  relu         %.2e\n  sigmoid      %.2e\n  scale        %.2e\n", d4, d5, d6);
     printf("  axpy         %.2e\n  add_bias     %.2e\n", d7, d8);
@@ -120,7 +122,7 @@ int main(void) {
     for (int i = 0; i < 7; ++i) if (ds[i] > worst) worst = ds[i];
     fail = worst > TOL;
     printf("%s (worst %.2e, tol %.0e)\n", fail ? "FAIL: OpenCL kernels diverge" :
-           "OpenCL backend matches CPU reference", worst, (double)TOL);
+           "backend matches CPU reference", worst, (double)TOL);
 
     mat_free(&A); mat_free(&B); mat_free(&C); mat_free(&Bt); mat_free(&C2);
     mat_free(&Aa); mat_free(&Bb); mat_free(&C3); mat_free(&R); mat_free(&S);
