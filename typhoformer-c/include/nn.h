@@ -7,10 +7,12 @@
 #ifndef TYPHOFORMER_NN_H
 #define TYPHOFORMER_NN_H
 
+#include <stdint.h>
+
 #include "tensor.h"
 
 /* ---- reproducible RNG + init ---------------------------------------- */
-void  nn_seed(unsigned long s);
+void  nn_seed(uint64_t s);
 float nn_uniform(float lo, float hi);
 
 /* ---- dropout mode (train vs eval) ----------------------------------- */
@@ -20,8 +22,8 @@ float nn_uniform(float lo, float hi);
  * thread-local (seed it per worker) so multicore training is race-free. */
 void nn_set_training(int on);
 void nn_set_dropout(float p);
-void nn_dropout_seed(unsigned long s);
-unsigned long nn_dropout_state(void);   /* current thread's dropout RNG (to thread it across workers) */
+void nn_dropout_seed(uint64_t s);
+uint64_t nn_dropout_state(void);   /* current thread's dropout RNG (to thread it across workers) */
 int  nn_training(void);
 float nn_dropout_draw(void);            /* uniform [0,1) from the thread-local training RNG */
 

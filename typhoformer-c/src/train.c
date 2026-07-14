@@ -31,6 +31,7 @@
 
 #include <math.h>
 #include <time.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -256,7 +257,7 @@ static int cmd_train(int argc, char **argv) {
      * spatial=0 is the DEFAULT (no N=1 spatial blocks — FINDINGS §7); pass
      * --spatial for the paper-faithful architecture. */
     int spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
-    unsigned long seed = 20260711, split_seed = 42;   /* weight-init/dropout RNG seed; storm-split RNG seed */
+    uint64_t seed = 20260711, split_seed = 42;   /* weight-init/dropout RNG seed; storm-split RNG seed */
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     /* Hand-rolled getopt: each arg is either a "--flag" toggle or a
      * "--key=value" pair matched by prefix (strncmp with the exact length that
@@ -357,7 +358,7 @@ static int cmd_train(int argc, char **argv) {
     dataset_standardize(&ds);                        /* z-score features + coords using TRAIN-only statistics */
     int *train = sp.train, *val = sp.val, *test = sp.test;   /* arrays of sample ids per split */
     int ntr = sp.n_train, nva = sp.n_val, nte = sp.n_test;   /* their counts */
-    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%lu | d_num=%d%s%s%s\n",
+    printf("records=%d storms=%d samples=%d  train=%d val=%d test=%d | split_seed=%" PRIu64 " | d_num=%d%s%s%s\n",
            ds.n_records, ds.n_storms, ds.n_samples, ntr, nva, nte, split_seed, ds.d_num,
            motion ? " (+motion)" : "", physics ? " (+physics)" : "", no_text ? " | NO-TEXT" : "");
     /* Announce the active decoder branch. The order mirrors precedence below:
@@ -591,7 +592,7 @@ static int cmd_eval(int argc, char **argv) {
      * deterministic split) and scores ONLY that subset — the honest way to
      * report held-out numbers from `eval` (the default scores ALL samples,
      * which mixes training storms in). -1 = no restriction. */
-    unsigned long split_seed = 42; int split_which = -1;
+    uint64_t split_seed = 42; int split_which = -1;
     for (int i = 1; i < argc; ++i) {
         if      (!strncmp(argv[i], "--weights=", 10)) weights = argv[i] + 10;   /* checkpoint to evaluate */
         else if (!strncmp(argv[i], "--csv=", 6))      csv = argv[i] + 6;
@@ -670,7 +671,7 @@ static int cmd_eval(int argc, char **argv) {
         if      (split_which == 2) { eidx = sp.test;  en = sp.n_test; }
         else if (split_which == 1) { eidx = sp.val;   en = sp.n_val; }
         else                       { eidx = sp.train; en = sp.n_train; }
-        printf("scoring the %s split only (split_seed=%lu): %d samples\n",
+        printf("scoring the %s split only (split_seed=%" PRIu64 "): %d samples\n",
                split_which == 2 ? "TEST" : split_which == 1 ? "VAL" : "TRAIN", split_seed, en);
     }
     ParTrainer *ept = (threads > 1 && K == 1) ? partrainer_new(&c, threads) : NULL;

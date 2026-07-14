@@ -13,10 +13,19 @@
  * deterministic stream — essential for the byte-stable golden regression:
  * the same seed reproduces the exact same weight initialization every run.
  * The initial state is an arbitrary nonzero constant (0 is a fixed point of
- * xorshift and must never be used, hence nn_seed maps 0 -> 1). */
-static unsigned long g_rng = 88172645463325252UL;
-void nn_seed(unsigned long s) { g_rng = s ? s : 1UL; }
-static unsigned long xorshift(void) {
+ * xorshift and must never be used, hence nn_seed maps 0 -> 1).
+ *
+ * The state MUST be uint64_t, never `unsigned long`: that type is 64-bit on
+ * LP64 (Linux/macOS) but 32-bit on LLP64 (Windows). At 32 bits the seed
+ * truncates, (13,7,17) is not a full-period triple, and — fatally —
+ * nn_uniform's `>> 11` then divide by 2^53 leaves ~21 significant bits over a
+ * 2^53 denominator, so EVERY draw collapses to ~0. Weight init returns the low
+ * end of the range for every parameter, the network starts perfectly
+ * symmetric, and the finite-difference gradient check fails. It compiles and
+ * runs; the model is silently garbage. */
+static uint64_t g_rng = 88172645463325252ULL;
+void nn_seed(uint64_t s) { g_rng = s ? s : 1ULL; }
+static uint64_t xorshift(void) {
     /* Three shift-xor rounds; the (13,7,17) triple is a known full-period set. */
     g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rng << 17;
     return g_rng;
@@ -36,11 +45,11 @@ float nn_uniform(float lo, float hi) {
  * and hand off state across steps with nn_dropout_state — no locks, no races. */
 static int   g_training = 0;      /* master train/eval switch (eval => no dropout) */
 static float g_dropout  = 0.1f;   /* drop probability p                            */
-static _Thread_local unsigned long g_drng = 88172645463325252UL;
+static _Thread_local uint64_t g_drng = 88172645463325252ULL;
 void nn_set_training(int on) { g_training = on; }
 void nn_set_dropout(float p) { g_dropout = p; }
-void nn_dropout_seed(unsigned long s) { g_drng = s ? s : 1UL; }
-unsigned long nn_dropout_state(void) { return g_drng; }
+void nn_dropout_seed(uint64_t s) { g_drng = s ? s : 1ULL; }
+uint64_t nn_dropout_state(void) { return g_drng; }
 int  nn_training(void) { return g_training; }
 static float drop_uniform(void) {
     /* Same xorshift64 as the init RNG but on the thread-local state. */

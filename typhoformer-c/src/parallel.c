@@ -32,7 +32,7 @@ typedef struct {
      * own dropout masks, so the parallel run is not a biased repeat of one mask
      * pattern. This is deterministic given the worker count, which is why the
      * serial path (threads=1) is used for the byte-exact golden test. */
-    unsigned long dseed;   /* per-worker dropout RNG state, threaded across batches */
+    uint64_t dseed;   /* per-worker dropout RNG state, threaded across batches */
     double loss;       /* out: summed loss over this worker's shard */
     pthread_t tid;
 } Worker;
@@ -73,7 +73,7 @@ ParTrainer *partrainer_new(const Config *cfg, int n_workers) {
         w->vel   = mat_new(1, 2);
         /* Seed = FNV-prime * (i+1) + 1: a cheap way to give each worker a
          * well-separated, nonzero starting dropout state. */
-        w->dseed = 0x100000001b3UL * (unsigned long)(i + 1) + 1;   /* distinct per worker */
+        w->dseed = 0x100000001b3ULL * (uint64_t)(i + 1) + 1;   /* distinct per worker */
     }
     return pt;
 }
