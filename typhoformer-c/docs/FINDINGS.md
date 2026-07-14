@@ -561,7 +561,61 @@ order of impact: motion features, the cv anchor, physics features, a robust
 loss, and one dropout notch. Every remaining candidate on the board is either
 measured-neutral or waiting on more storms.
 
-## 15. What this means
+## 15. The 826-storm retest — the data finally arrived, and the verdicts hold
+
+`HURDAT_full.csv` (24,177 records, **826 storms**, 2004–2025, three basins —
+8.4× the bundled sample) makes the questions of §7–§14 answerable. Protocol as
+always: five split seeds, 30 epochs, `--patience=8`, text-free (`--emb=none`),
+split-matched CLIPER via 0-epoch cv checkpoints. One critical calibration:
+**the bars move with the data** — split-matched CLIPER at 6h is now **32.0 km**
+(vs 39.4 on the 98-storm sample; the multi-basin mix tracks more steadily), so
+only internal comparisons are valid, never cross-dataset ones.
+
+**The headline: the recipe beats constant-velocity over the 48h rollout on all
+five splits — and the crossover is exactly where theory says it should be.**
+Per-horizon held-out ΔR (km), 5-seed means, recipe (`--motion --physics --cv
+--huber=0.1`) vs split-matched CLIPER:
+
+| horizon | 6h | 12h | 18h | 24h | 30h | 36h | 42h | 48h |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| *CLIPER* | *28.0* | *68.3* | *119.0* | *178.3* | *245.2* | *318.9* | *398.3* | *482.9* |
+| recipe | 31.3 | 70.7 | 120.1 | **175.5** | **236.1** | **301.4** | **370.3** | **442.3** |
+
+Dead reckoning wins the first three steps; the learned curvature takes over at
+24h and pulls away monotonically to **−40.6 km (−8.4%) at 48h**. Over the full
+6–48h curve the recipe wins on **5/5 splits** (227.9 vs 235.0 mean). At 6h
+alone, CLIPER wins on 5/5 (32.0 vs 35.2): the small-sample "under the bar at
+6h" result (§14) did **not** survive scaling — the bar strengthened more than
+the model. Honest framing: one-step extrapolation on steady storms is nearly
+unbeatable; this model's value begins where forecasting gets hard.
+
+**The levers matter MORE at scale.** Plain `--motion --cv` (no physics, MSE):
+49.9 km at 6h — 14.7 km behind the recipe (on 98 storms the same gap was ~1
+km). At 48h (seeds 1/3/5): plain cv 230.7 ≈ CLIPER 230.1, recipe 223.6. The
+physics features and robust loss are not small-sample artifacts; they are what
+lets the model use the extra data.
+
+**Small-sample verdicts, re-tested at scale (seeds 1/3/5, 48h means):**
+
+| variant | 826-storm result | small-sample verdict |
+|:--|:--:|:--|
+| `--gru` | 256.2 vs cv 230.7 — **worse by 25 km, decisively** | "parity-or-worse" (§11) → now conclusive |
+| `--xattn` | 229.5 vs cv 230.7 — parity | "worse at 48h" (§11) → parity; still no reason to pay for it |
+| `--rotframe` (on the recipe, 6h) | 37.1 vs 35.3 — worse on 3/3 | negative (§13) → confirmed |
+
+Decoder memory is dead as an idea on this task; the frame rotation too. The
+§11 methodology lesson also held up: the noise floor dropped with the data and
+none of the "promising" small-sample wiggles reappeared.
+
+**Absolute progress, for the record.** Trained on 826 storms the recipe scores
+35.2 km @ 6h and 227.9 over 6–48h — versus 38.5 and 275.3 when trained on 98
+storms. More data improved the model everywhere, exactly as every section
+since §3 predicted; it just improved the baseline's *test conditions* too.
+Remaining honest caveats: seed 3 is a 6h outlier (40.0 vs the others'
+31.6–35.5), and the hyperparameters were tuned on the small sample — a scaled
+re-tune (best epochs land early: 2–27) is the natural next pass.
+
+## 16. What this means
 
 - The engineering was always sound (gradient checks, golden, cross-backend
   agreement). The *modeling* had a concrete, fixable flaw — the inputs omitted

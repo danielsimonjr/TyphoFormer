@@ -121,13 +121,15 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. `--emb=none` = **text-free mode**: the language branch is fed zeros (== `--no_text`), so CSVs converted from raw HURDAT2 train without any embeddings. | repo defaults |
 
 **For accuracy, train with `--motion --physics --cv --huber=0.1`** (the
-best-known recipe at both horizons): motion features give the model the
-trajectory signal, the physics features add the curvature signal (heading,
-acceleration, seasonal phase — better on all five test splits), the
-constant-velocity anchor lets it start at CLIPER and learn only the
-correction, and the Huber loss tames outlier storms — held-out ΔR
-**38.5 km at 6h (under the ~39.4 km CLIPER bar)** and best-known at 48h
-(see [docs/FINDINGS.md](docs/FINDINGS.md) §9/§11/§13/§14).
+best-known recipe): motion features give the model the trajectory signal, the
+physics features add the curvature signal, the constant-velocity anchor lets
+it start at CLIPER and learn only the correction, and the Huber loss tames
+outlier storms. On the full 826-storm dataset
+(`--csv=../HURDAT_full.csv --emb=none`) it **beats split-matched
+constant-velocity over the 48-hour rollout on all five splits** — crossover at
+24h, **−8.4% at 48h** — while one-step (6h) dead reckoning remains ahead; on
+the bundled 98-storm sample it scores 38.5 km @ 6h, under that sample's
+39.4 km CLIPER bar (see [docs/FINDINGS.md](docs/FINDINGS.md) §14–§15).
 All decoder variants work on both the serial and the data-parallel
 (`--threads=N`) paths. `eval`/`predict` auto-detect `--motion`/`--physics` from
 the checkpoint's feature count; pass `--delta`/`--cv` to `eval` to match the
@@ -315,9 +317,12 @@ split noise (see [FINDINGS §10–§11](docs/FINDINGS.md)).
 The full story is in [**docs/FINDINGS.md**](docs/FINDINGS.md). In short: the
 default model was **blind to motion** (its inputs are intensity + text; position
 and velocity were never fed in), so it lost to a two-line physics baseline.
-Feeding motion and predicting displacement takes held-out ΔR from **131 km → 48
-km**; anchoring the decoder at constant-velocity (`--cv`) reaches **40.8 km** —
-matching CLIPER at 6h and **beating it at 48h on 4 of 5 splits**. And the
+Feeding motion, anchoring at constant-velocity, adding physics features and a
+Huber loss takes held-out ΔR from **131 km → 38.5 km** on this sample — and
+trained on the full three-basin dataset (826 storms, `tools/fetch_hurdat2.sh`)
+the same recipe **beats split-matched constant-velocity over the 48-hour
+rollout on all five splits** (−8.4% at 48h; one-step dead reckoning stays
+ahead at 6h). And the
 **language branch still doesn't help** even with a working model
 (numbers-only is marginally *better*), a robust negative result on this data.
 
