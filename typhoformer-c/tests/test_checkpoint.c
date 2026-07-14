@@ -100,6 +100,50 @@ int main(void) {
     printf("checkpoint round-trip: %ld params, TFW2 stats=%d, TFW1 stats=%d  %s\n",
            np, ns, ns1, fail ? "FAIL" : "ok");
 
+    /* ---- TFW4: the mode bitfield -------------------------------------
+     * Before v4 the decoder mode was NOT recorded. The size-mismatch guard cannot
+     * catch --cv/--delta/--rotframe because they are parameter-NEUTRAL, so a
+     * cv-trained checkpoint evaluated without --cv loaded cleanly and reported
+     * 5071 km where the truth was 29 km. Pin the round-trip so that cannot regress. */
+    unsigned modes_w = TF_MODE_CV | TF_MODE_ROTFRAME | TF_MODE_NO_SPATIAL;
+    checkpoint_save4(CKPT, c, mean, std, c.d_num, cmean, cstd, modes_w, &pl);
+
+    unsigned modes_r = 0;
+    if (!checkpoint_load_modes(CKPT, &modes_r)) {
+        printf("FAIL: TFW4 checkpoint did not report modes\n"); fail = 1;
+    } else if (modes_r != modes_w) {
+        printf("FAIL: modes round-trip %u != %u\n", modes_r, modes_w); fail = 1;
+    }
+
+    /* A TFW4 file must still load config, stats and params like a TFW3 one — the
+     * readers have to SKIP the new word, not trip over it. */
+    Config c4 = checkpoint_load_config(CKPT);
+    if (!cfg_eq(c, c4)) { printf("FAIL: config mismatch after TFW4 load\n"); fail = 1; }
+    if (checkpoint_load_stats(CKPT, rmean, rstd) != c.d_num) {
+        printf("FAIL: TFW4 feature stats lost\n"); fail = 1;
+    }
+    if (!checkpoint_load_coord_stats(CKPT, rcm, rcs)) {
+        printf("FAIL: TFW4 coord stats lost\n"); fail = 1;
+    }
+    ParamList pl4; plist_init(&pl4);
+    Model m4 = model_new(&c4, &pl4);
+    checkpoint_load_params(CKPT, &pl4);   /* must seek PAST the modes word */
+
+    /* An older checkpoint must report "no modes recorded" rather than garbage. */
+    checkpoint_save3(CKPT, c, mean, std, c.d_num, cmean, cstd, &pl);
+    unsigned modes_old = 0xDEADBEEF;
+    if (checkpoint_load_modes(CKPT, &modes_old)) {
+        printf("FAIL: TFW3 checkpoint claimed to carry modes\n"); fail = 1;
+    }
+    if (modes_old != 0xDEADBEEF) {
+        printf("FAIL: load_modes clobbered the caller's value on a TFW3 file\n"); fail = 1;
+    }
+
+    printf("TFW4 modes round-trip: %s (%s)  %s\n",
+           checkpoint_modes_str(modes_r), "cv+rotframe+no_spatial expected",
+           fail ? "FAIL" : "ok");
+    model_free(&m4); plist_free(&pl4);
+
     remove(CKPT);
     free(snap);
     model_free(&m); plist_free(&pl);

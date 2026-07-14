@@ -31,6 +31,7 @@
 #define MAGIC1 "TFW1"   /* legacy: no stats block                 */
 #define MAGIC2 "TFW2"   /* config + feature stats + params        */
 #define MAGIC3 "TFW3"   /* + coordinate (lat/lon) stats           */
+#define MAGIC4 "TFW4"   /* + model mode bitfield (decoder/arch)   */
 
 /* Compare a just-read 4-byte tag against one of the MAGIC constants. Uses a
  * fixed length of 4 (not strcmp) because the tags are not NUL-terminated on
@@ -113,7 +114,8 @@ Config checkpoint_load_config(const char *path) {
     char magic[4]; int h[9];
     /* Accept any of the three known magics; anything else is not our file. */
     if (fread(magic, 1, 4, f) != 4 ||
-        (!is_magic(magic, MAGIC1) && !is_magic(magic, MAGIC2) && !is_magic(magic, MAGIC3)))
+        (!is_magic(magic, MAGIC1) && !is_magic(magic, MAGIC2) &&
+         !is_magic(magic, MAGIC3) && !is_magic(magic, MAGIC4)))
         die("%s: not a TyphoFormer checkpoint", path);
     if (fread(h, sizeof(int), 9, f) != 9) die("%s: unexpected end of file", path);
     fclose(f);
@@ -138,15 +140,21 @@ static void seek_to_params(FILE *f, const char *path) {
     if (fseek(f, 9 * (long)sizeof(int), SEEK_CUR) != 0) die("%s: bad checkpoint", path);
     /* TFW2 and TFW3 both carry a feature-stats block: an int count ns followed
      * by ns means and ns stds, i.e. 2*ns floats to jump over. */
-    if (is_magic(magic, MAGIC2) || is_magic(magic, MAGIC3)) {
+    if (is_magic(magic, MAGIC2) || is_magic(magic, MAGIC3) || is_magic(magic, MAGIC4)) {
         int ns; if (fread(&ns, sizeof(int), 1, f) != 1) die("%s: unexpected end of file", path);
         if (fseek(f, 2L * ns * (long)sizeof(float), SEEK_CUR) != 0) die("%s: bad checkpoint", path);
     }
     /* Only TFW3 carries the coordinate block. `hc` here is the has_coord flag;
      * when set, 4 floats follow (cmean[2] then cstd[2]). */
-    if (is_magic(magic, MAGIC3)) {
+    if (is_magic(magic, MAGIC3) || is_magic(magic, MAGIC4)) {
         int hc; if (fread(&hc, sizeof(int), 1, f) != 1) die("%s: unexpected end of file", path);
         if (hc && fseek(f, 4L * (long)sizeof(float), SEEK_CUR) != 0) die("%s: bad checkpoint", path);
+    }
+    /* TFW4 only: one uint32 mode bitfield sits between the coord block and the
+     * parameters. Skipping it here is what lets every existing reader work on a v4
+     * file unchanged. */
+    if (is_magic(magic, MAGIC4)) {
+        if (fseek(f, (long)sizeof(unsigned), SEEK_CUR) != 0) die("%s: bad checkpoint", path);
     }
 }
 
@@ -183,7 +191,8 @@ int checkpoint_load_stats(const char *path, float *mean, float *std) {
     if (!f) die("cannot open %s", path);
     char magic[4];
     /* Only TFW2/TFW3 carry stats; anything else -> 0 (no stats available). */
-    if (fread(magic, 1, 4, f) != 4 || (!is_magic(magic, MAGIC2) && !is_magic(magic, MAGIC3))) {
+    if (fread(magic, 1, 4, f) != 4 ||
+        (!is_magic(magic, MAGIC2) && !is_magic(magic, MAGIC3) && !is_magic(magic, MAGIC4))) {
         fclose(f); return 0;
     }
     if (fseek(f, 9 * (long)sizeof(int), SEEK_CUR) != 0) { fclose(f); return 0; }
@@ -209,7 +218,8 @@ int checkpoint_load_coord_stats(const char *path, float *cmean, float *cstd) {
     FILE *f = fopen(path, "rb");
     if (!f) die("cannot open %s", path);
     char magic[4];
-    if (fread(magic, 1, 4, f) != 4 || !is_magic(magic, MAGIC3)) { fclose(f); return 0; }
+    if (fread(magic, 1, 4, f) != 4 ||
+        (!is_magic(magic, MAGIC3) && !is_magic(magic, MAGIC4))) { fclose(f); return 0; }
     if (fseek(f, 9 * (long)sizeof(int), SEEK_CUR) != 0) { fclose(f); return 0; }
     int ns;
     if (fread(&ns, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
@@ -281,4 +291,88 @@ int checkpoint_load_optim(const char *path, Adam *a, int *epoch) {
     a->t = t; a->lr = lr; if (epoch) *epoch = ep;
     fclose(f);
     return 1;
+}
+
+
+/* ---- TFW4: model mode bitfield --------------------------------------
+ * Why this exists at all: see the long note at the top of checkpoint.h. Briefly —
+ * the untagged-parameter size guard catches a GEOMETRY mismatch but is blind to a
+ * SEMANTIC one. --cv/--delta/--rotframe reuse the same tensors and only change what
+ * the decoder's output means, so a cv-trained checkpoint evaluated without --cv
+ * loads perfectly and is confidently, silently wrong (5071 km vs 29 km, measured). */
+
+/* Identical to checkpoint_save3 but tagged TFW4 and with the mode word written
+ * between the coordinate block and the parameters. */
+void checkpoint_save4(const char *path, Config c, const float *mean, const float *std,
+                      int n_stats, const float *cmean, const float *cstd,
+                      unsigned modes, const ParamList *pl) {
+    FILE *f = fopen(path, "wb");
+    if (!f) die("cannot write %s", path);
+    int hc[9] = {c.d_num, c.d_text, c.d_model, c.out_dim, c.in_len,
+                 c.pred_len, c.d_ff, c.n_heads, c.n_layers};
+    int ns = n_stats, has_coord = (cmean && cstd) ? 1 : 0;
+    fwrite(MAGIC4, 1, 4, f);
+    fwrite(hc, sizeof(int), 9, f);
+    fwrite(&ns, sizeof(int), 1, f);
+    if (ns) { fwrite(mean, sizeof(float), ns, f); fwrite(std, sizeof(float), ns, f); }
+    fwrite(&has_coord, sizeof(int), 1, f);
+    if (has_coord) { fwrite(cmean, sizeof(float), 2, f); fwrite(cstd, sizeof(float), 2, f); }
+    fwrite(&modes, sizeof(unsigned), 1, f);          /* <-- the v4 addition */
+    for (int p = 0; p < pl->count; ++p)
+        fwrite(pl->item[p].v, sizeof(float), pl->item[p].n, f);
+    fclose(f);
+}
+
+/* Read the mode word. Returns 0 for TFW1/2/3 WITHOUT touching *modes, so a caller
+ * can distinguish "no modes recorded" from "modes == 0" (a legitimately plain model). */
+int checkpoint_load_modes(const char *path, unsigned *modes) {
+    FILE *f = fopen(path, "rb");
+    if (!f) die("cannot open %s", path);
+    char magic[4];
+    if (fread(magic, 1, 4, f) != 4 || !is_magic(magic, MAGIC4)) { fclose(f); return 0; }
+    /* Walk the same blocks seek_to_params does, stopping ON the mode word. */
+    if (fseek(f, 9 * (long)sizeof(int), SEEK_CUR) != 0) { fclose(f); die("%s: bad checkpoint", path); }
+    int ns;
+    if (fread(&ns, sizeof(int), 1, f) != 1) { fclose(f); die("%s: unexpected end of file", path); }
+    if (fseek(f, 2L * ns * (long)sizeof(float), SEEK_CUR) != 0) { fclose(f); die("%s: bad checkpoint", path); }
+    int has_coord;
+    if (fread(&has_coord, sizeof(int), 1, f) != 1) { fclose(f); die("%s: unexpected end of file", path); }
+    if (has_coord && fseek(f, 4L * (long)sizeof(float), SEEK_CUR) != 0) { fclose(f); die("%s: bad checkpoint", path); }
+    unsigned m;
+    if (fread(&m, sizeof(unsigned), 1, f) != 1) { fclose(f); die("%s: unexpected end of file", path); }
+    fclose(f);
+    *modes = m;
+    return 1;
+}
+
+/* Push the bitfield into model.c's module-level globals. Every flag is set
+ * EXPLICITLY (including to 0) so this fully overrides whatever the CLI parse left
+ * behind — the checkpoint is the authority on what it is. Must run before model_new. */
+void checkpoint_apply_modes(unsigned modes) {
+    model_set_delta     (!!(modes & TF_MODE_DELTA));
+    model_set_cv        (!!(modes & TF_MODE_CV));
+    model_set_gru       (!!(modes & TF_MODE_GRU));
+    model_set_xattn     (!!(modes & TF_MODE_XATTN));
+    model_set_rotframe  (!!(modes & TF_MODE_ROTFRAME));
+    model_set_no_spatial(!!(modes & TF_MODE_NO_SPATIAL));
+    model_set_posenc    (!!(modes & TF_MODE_POSENC));
+    model_set_pool_last (!!(modes & TF_MODE_POOL_LAST));
+    model_set_co_spatial(!!(modes & TF_MODE_CO_SPATIAL));
+}
+
+const char *checkpoint_modes_str(unsigned modes) {
+    static char buf[128];
+    buf[0] = '\0';
+    /* Decoder head first (mutually exclusive), then the modifiers. */
+    if      (modes & TF_MODE_GRU)   strcat(buf, "gru");
+    else if (modes & TF_MODE_XATTN) strcat(buf, "xattn");
+    else if (modes & TF_MODE_CV)    strcat(buf, "cv");
+    else if (modes & TF_MODE_DELTA) strcat(buf, "delta");
+    else                            strcat(buf, "plain");
+    if (modes & TF_MODE_ROTFRAME)   strcat(buf, "+rotframe");
+    if (modes & TF_MODE_NO_SPATIAL) strcat(buf, "+no_spatial");
+    if (modes & TF_MODE_POSENC)     strcat(buf, "+posenc");
+    if (modes & TF_MODE_POOL_LAST)  strcat(buf, "+pool_last");
+    if (modes & TF_MODE_CO_SPATIAL) strcat(buf, "+co_spatial");
+    return buf;
 }
