@@ -17,7 +17,11 @@ tests/test_dropout
 tests/test_gru
 tests/test_xattn
 typhoformer
+typhoformer.exe
+tests/*.exe
 backends/opencl/test_opencl
+backends/cuda/test_cuda
+backends/cuda/*.o
 ._test_*.tmp
 ._test_*.tmp.npy
 *.bin
