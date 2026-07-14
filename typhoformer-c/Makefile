@@ -38,6 +38,16 @@ endif
 ifeq ($(OPENCL),1)
 LDLIBS  += -lOpenCL
 TENSOR_OBJ := backends/opencl/tensor_opencl.o
+else ifeq ($(CUDA),1)
+# CUDA backend: same seam, swap in the .cu implementation and link cudart.
+#   make CUDA=1 test-cuda        # needs the CUDA toolkit AND a real NVIDIA GPU
+# CUDA_ARCH must match the device: sm_61 is Pascal (e.g. Quadro P1000). Note that
+# CUDA 13.0 REMOVED Maxwell/Pascal/Volta, so sm_61 needs a 12.x toolkit.
+NVCC      ?= nvcc
+CUDA_ARCH ?= sm_61
+CUDA_HOME ?= /usr/local/cuda
+LDLIBS    += -L$(CUDA_HOME)/lib64 -lcudart
+TENSOR_OBJ := backends/cuda/tensor_cuda.o
 else
 TENSOR_OBJ := src/tensor.o
 endif
@@ -51,7 +61,7 @@ TESTS   := tests/test_tensor tests/test_nn tests/test_model tests/test_data \
            tests/test_xattn
 BUILD   := $(filter-out src/train.o,$(OBJ))
 
-.PHONY: all lib test test-san test-valgrind test-opencl clean
+.PHONY: all lib test test-san test-valgrind test-opencl test-cuda clean
 
 all: typhoformer
 
@@ -81,8 +91,13 @@ VALGRIND ?= valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kind
 test-valgrind: $(TESTS)
 	@for t in $(TESTS); do echo "== valgrind $$t =="; $(VALGRIND) ./$$t || exit 1; done
 
-# OpenCL correctness cross-check: kernels vs a CPU reference (needs OPENCL=1).
-backends/opencl/test_opencl: backends/opencl/test_opencl.c $(BUILD)
+# Backend correctness cross-check: every kernel vs an inline CPU reference.
+# The source (backends/test_backend.c) is backend-AGNOSTIC — it only speaks the
+# tensor.h seam — so the SAME check verifies whichever backend is linked in.
+backends/opencl/test_opencl: backends/test_backend.c $(BUILD)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+backends/cuda/test_cuda: backends/test_backend.c $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
 # Verify the OpenCL backend: cross-check the kernels, then run the full-model
@@ -92,15 +107,27 @@ test-opencl: backends/opencl/test_opencl tests/test_tensor tests/test_model
 	@echo "== tensor gradient check (through OpenCL) =="; ./tests/test_tensor || exit 1
 	@echo "== full-model gradient check (through OpenCL) =="; ./tests/test_model || exit 1
 
+# Verify the CUDA backend on a REAL GPU: same three gates as OpenCL, run through
+# the .cu kernels. Must be invoked as `make CUDA=1 test-cuda`. CI only *compiles*
+# the CUDA backend (no GPU on the runner); this target is what actually executes it.
+test-cuda: backends/cuda/test_cuda tests/test_tensor tests/test_model
+	@echo "== CUDA kernel cross-check =="; ./backends/cuda/test_cuda || exit 1
+	@echo "== tensor gradient check (through CUDA) =="; ./tests/test_tensor || exit 1
+	@echo "== full-model gradient check (through CUDA) =="; ./tests/test_model || exit 1
+
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 backends/opencl/%.o: backends/opencl/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+backends/cuda/%.o: backends/cuda/%.cu
+	$(NVCC) -O3 -std=c++14 -arch=$(CUDA_ARCH) -Iinclude -c $< -o $@
+
 clean:
 	rm -f src/*.o src/*.d backends/opencl/*.o backends/opencl/*.d \
-	      backends/opencl/test_opencl tests/*.d \
+	      backends/opencl/test_opencl backends/cuda/*.o backends/cuda/test_cuda \
+	      backends/cuda/libtyphoformer_cuda.a tests/*.d \
 	      $(TESTS) typhoformer libtyphoformer.a *.ckpt *.tfb
 
 # Pull in the auto-generated header dependencies (no-op on the first build).

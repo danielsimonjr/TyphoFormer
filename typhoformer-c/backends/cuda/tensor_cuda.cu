@@ -2,25 +2,31 @@
  * tensor_cuda.cu — a CUDA reference backend for TyphoFormer-C.
  *
  * This translation unit implements the SAME kernel set declared in
- * include/tensor.h (the backend contract documented in include/backend.h),
- * but keeps Mat.data resident in device (GPU) memory. Link this file in place
- * of src/tensor.c and the entire model runs on the GPU — no layer code changes,
- * because every layer is written only in terms of these primitives.
+ * include/tensor.h (the backend contract documented in include/backend.h).
+ * Link it in place of src/tensor.c and every layer's math runs on the GPU — no
+ * layer code changes, because every layer is written only in terms of these
+ * primitives.
  *
- * STATUS: compile-ready reference. It requires the CUDA toolkit (nvcc) which is
- * not part of the standard-library-only default build, so it is NOT compiled or
- * run by the top-level Makefile and has not been executed in this repository's
- * CI. It is here to (a) prove the seam is real — the CPU model is expressed
- * purely through these ~13 functions — and (b) give an engineer a correct,
- * readable starting point. Build it with backends/cuda/Makefile (see there).
+ * STATUS: RUN-VERIFIED on real hardware (Quadro P1000, sm_61, CUDA 12.8) via
+ *   make CUDA=1 test-cuda
+ * which runs the backend kernel cross-check plus the tensor and full-model
+ * gradient checks *through* these kernels. CI still only compile-checks this
+ * file (GitHub runners have no NVIDIA GPU), so the executing gate is that
+ * local target.
+ *
+ * Until 2026-07-14 this file had only ever been COMPILED, and it did not work:
+ * it made Mat.data a cudaMalloc'd DEVICE pointer while asserting that "the rest
+ * of the program is oblivious to where the data lives." It is not — nn.c and
+ * model.c dereference Mat.data[i] directly in ~189 places — so the first host
+ * read segfaulted. See the memory section below.
  *
  * Design choices kept deliberately simple for readability over peak FLOPS:
- *   - Mat.data is a device pointer (cudaMalloc). rows/cols live on the host.
+ *   - Mat.data is HOST-resident; each wrapper stages its operands to the device
+ *     and copies results back (same choice the OpenCL backend documents). Slow,
+ *     but correct against the code that actually calls it.
  *   - One thread per output element for GEMM (no shared-memory tiling). This is
  *     correct and easy to read; the natural next exercise is a tiled GEMM.
  *   - Reductions (mat_colsum) use atomicAdd for brevity.
- * Every function matches the host-visible signature in tensor.h exactly, so the
- * rest of the program is oblivious to where the data lives.
  */
 
 #include <cuda_runtime.h>
@@ -28,6 +34,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 extern "C" {
 #include "tensor.h"
@@ -63,41 +70,90 @@ extern "C" TF_NORETURN void die(const char *fmt, ...) {
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
 /* ---- memory ----------------------------------------------------------
- * Unlike the OpenCL backend (host-resident data), here Mat.data is a DEVICE pointer.
- * These four functions therefore differ from src/tensor.c only in swapping the C stdlib
- * calls for their CUDA equivalents: calloc->cudaMalloc+cudaMemset, free->cudaFree,
- * memset->cudaMemset, memcpy->cudaMemcpy(...DeviceToDevice). The Mat struct (rows/cols
- * on the host, data pointer) is unchanged, so callers can't tell where the data lives —
- * that is the whole point of the backend seam. Note m.data must never be dereferenced
- * on the host; only kernels and cuda* calls may touch it. */
+ * Mat.data is HOST-resident (plain malloc'd float*), exactly as in src/tensor.c and the
+ * OpenCL backend. Each kernel wrapper below stages its operands to the device, launches,
+ * and copies the result back.
+ *
+ * This is NOT a performance choice — a per-call host<->device round trip is the slowest
+ * thing you could do — it is a CORRECTNESS requirement, and it is why this backend now
+ * runs at all. The seam in tensor.h is only ~13 kernels wide, but the rest of the program
+ * does NOT confine itself to that seam: nn.c and model.c dereference `Mat.data[i]`
+ * directly in ~189 places (weight init, loss, softmax, and all the glue), as does the
+ * backend cross-check. An earlier version of this file made Mat.data a cudaMalloc'd
+ * DEVICE pointer and asserted "callers can't tell where the data lives" — they can, and
+ * they do: the first host read of a device pointer segfaults. That version compiled, CI
+ * only ever compile-checked it, and it had never once been executed. It could not have
+ * worked with this codebase.
+ *
+ * So: host-resident data, device staging per call. Slow, correct, and it actually runs.
+ * (Making the data genuinely device-resident is a real option, but it requires routing
+ * those ~189 direct accesses through the seam first — a much larger change.) */
+
+/* ---- device scratch pool ----
+ * cudaMalloc and cudaFree cost on the order of a MILLISECOND each. Doing a
+ * malloc/free pair per matrix op is correct but unusable: a full-model
+ * finite-difference gradient check issues millions of ops, and the first version
+ * of this file (allocating per call) was still grinding after 30 minutes on a
+ * P1000 — the allocator, not the kernels, was the entire cost.
+ *
+ * Instead, keep a handful of device buffers alive and grow them on demand. Reusing
+ * fixed slots across calls is safe because every launch below is immediately
+ * followed by cudaDeviceSynchronize(), so no kernel is ever still in flight when
+ * the next call reuses a slot. Three slots is enough: the widest op (GEMM) needs
+ * A, B and out simultaneously. */
+#define TF_CUDA_SLOTS 3
+static float *g_buf[TF_CUDA_SLOTS];
+static size_t g_cap[TF_CUDA_SLOTS];
+
+/* Device buffer for slot i, at least n floats. Grows (never shrinks). */
+static float *dslot(int i, size_t n) {
+    if (n > g_cap[i]) {
+        if (g_buf[i]) CUDA_CHECK(cudaFree(g_buf[i]));
+        CUDA_CHECK(cudaMalloc((void **)&g_buf[i], n * sizeof(float)));
+        g_cap[i] = n;
+    }
+    return g_buf[i];
+}
+/* Stage n floats host->device into slot i. */
+static float *dev_up(int i, const float *host, size_t n) {
+    float *d = dslot(i, n);
+    CUDA_CHECK(cudaMemcpy(d, host, n * sizeof(float), cudaMemcpyHostToDevice));
+    return d;
+}
+/* Zeroed device scratch in slot i (for outputs that are written, not read). */
+static float *dev_zero(int i, size_t n) {
+    float *d = dslot(i, n);
+    CUDA_CHECK(cudaMemset(d, 0, n * sizeof(float)));
+    return d;
+}
+/* Copy n floats device->host. */
+static void dev_down(float *host, const float *dev, size_t n) {
+    CUDA_CHECK(cudaMemcpy(host, dev, n * sizeof(float), cudaMemcpyDeviceToHost));
+}
 
 extern "C" Mat mat_new(int rows, int cols) {
     Mat m;
     m.rows = rows;
     m.cols = cols;
-    /* Allocate rows*cols floats on the device and zero them (calloc-equivalent). */
-    CUDA_CHECK(cudaMalloc((void **)&m.data, (size_t)rows * cols * sizeof(float)));
-    CUDA_CHECK(cudaMemset(m.data, 0, (size_t)rows * cols * sizeof(float)));
+    m.data = (float *)calloc((size_t)rows * cols, sizeof(float));
+    if (!m.data) die("mat_new: out of memory (%dx%d)", rows, cols);
     return m;
 }
 
 extern "C" void mat_free(Mat *m) {
     if (m && m->data) {
-        cudaFree(m->data);   /* release device allocation */
+        free(m->data);
         m->data = NULL;
         m->rows = m->cols = 0;
     }
 }
 
 extern "C" void mat_zero(Mat m) {
-    CUDA_CHECK(cudaMemset(m.data, 0, (size_t)m.rows * m.cols * sizeof(float)));
+    memset(m.data, 0, (size_t)m.rows * m.cols * sizeof(float));
 }
 
 extern "C" void mat_copy(Mat dst, const Mat src) {
-    /* Device-to-device copy: both pointers are GPU addresses, no host round-trip. */
-    CUDA_CHECK(cudaMemcpy(dst.data, src.data,
-                          (size_t)src.rows * src.cols * sizeof(float),
-                          cudaMemcpyDeviceToDevice));
+    memcpy(dst.data, src.data, (size_t)src.rows * src.cols * sizeof(float));
 }
 
 /* ---- GEMM: one thread per output element -----------------------------
@@ -162,11 +218,15 @@ __global__ void k_matmul_atb(const float *A, const float *B, float *C,
  * three int dimension args, whose meaning depends on the specific kernel (see wrappers). */
 static void launch_gemm(void (*kern)(const float *, const float *, float *, int, int, int),
                         const Mat A, const Mat B, Mat out, int a1, int a2, int a3) {
+    size_t nA = (size_t)A.rows * A.cols, nB = (size_t)B.rows * B.cols,
+           nO = (size_t)out.rows * out.cols;
+    float *dA = dev_up(0, A.data, nA), *dB = dev_up(1, B.data, nB), *dO = dev_zero(2, nO);
     dim3 block(16, 16);
     dim3 grid(ceil_div(out.cols, block.x), ceil_div(out.rows, block.y));
-    kern<<<grid, block>>>(A.data, B.data, out.data, a1, a2, a3);
+    kern<<<grid, block>>>(dA, dB, dO, a1, a2, a3);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(out.data, dO, nO);
 }
 
 /* Public GEMM entry points — same signatures and dimension-passing as the CPU/OpenCL
@@ -207,21 +267,23 @@ __global__ void k_colsum(const float *m, float *out, int rows, int cols) {
 }
 
 extern "C" void mat_add_bias(Mat m, const float *bias) {
-    /* bias is expected device-resident (same address space as m.data). */
-    /* t = 256 threads/block; grid = ceil_div(n, t) blocks to cover all n elements. */
+    /* Both m.data and bias are HOST pointers (tensor.h's contract) — stage both. */
     int n = m.rows * m.cols, t = 256;
-    k_add_bias<<<ceil_div(n, t), t>>>(m.data, bias, m.rows, m.cols);
+    float *dM = dev_up(0, m.data, (size_t)n), *dB = dev_up(1, bias, (size_t)m.cols);
+    k_add_bias<<<ceil_div(n, t), t>>>(dM, dB, m.rows, m.cols);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(m.data, dM, (size_t)n);          /* in-place: write the result back */
 }
 
 extern "C" void mat_colsum(const Mat m, float *out) {
-    /* Clear the `cols` accumulators first — k_colsum only ever adds into them. */
-    CUDA_CHECK(cudaMemset(out, 0, (size_t)m.cols * sizeof(float)));
+    /* `out` is a HOST float[cols]. dev_new zeroes the accumulators — k_colsum only adds. */
     int n = m.rows * m.cols, t = 256;
-    k_colsum<<<ceil_div(n, t), t>>>(m.data, out, m.rows, m.cols);
+    float *dM = dev_up(0, m.data, (size_t)n), *dO = dev_zero(1, (size_t)m.cols);
+    k_colsum<<<ceil_div(n, t), t>>>(dM, dO, m.rows, m.cols);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(out, dO, (size_t)m.cols);
 }
 
 /* ---- pointwise / scalar ---------------------------------------------
@@ -247,30 +309,39 @@ __global__ void k_axpy(float *y, float a, const float *x, int n) {
     if (i < n) y[i] += a * x[i];
 }
 
-/* Public wrappers. All share the 1D launch pattern: 256 threads/block, ceil_div(n,256)
- * blocks, launch, check-last-error, synchronize. Operate in place on device memory. */
+/* Public wrappers. All share the 1D launch pattern: stage the host data to the device,
+ * 256 threads/block over ceil_div(n,256) blocks, launch, check-last-error, synchronize,
+ * copy the (in-place) result back to the host buffer. */
 extern "C" void mat_relu(Mat m) {
     int n = m.rows * m.cols, t = 256;
-    k_relu<<<ceil_div(n, t), t>>>(m.data, n);
+    float *dM = dev_up(0, m.data, (size_t)n);
+    k_relu<<<ceil_div(n, t), t>>>(dM, n);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(m.data, dM, (size_t)n);
 }
 extern "C" void mat_sigmoid(Mat m) {
     int n = m.rows * m.cols, t = 256;
-    k_sigmoid<<<ceil_div(n, t), t>>>(m.data, n);
+    float *dM = dev_up(0, m.data, (size_t)n);
+    k_sigmoid<<<ceil_div(n, t), t>>>(dM, n);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(m.data, dM, (size_t)n);
 }
 extern "C" void mat_scale(Mat m, float s) {
     int n = m.rows * m.cols, t = 256;
-    k_scale<<<ceil_div(n, t), t>>>(m.data, s, n);
+    float *dM = dev_up(0, m.data, (size_t)n);
+    k_scale<<<ceil_div(n, t), t>>>(dM, s, n);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(m.data, dM, (size_t)n);
 }
 extern "C" void mat_axpy(Mat y, float a, const Mat x) {
-    /* Both y and x are device pointers; the kernel reads x and updates y in place. */
+    /* y is read-modify-write, x is read-only; both are host buffers. */
     int n = y.rows * y.cols, t = 256;
-    k_axpy<<<ceil_div(n, t), t>>>(y.data, a, x.data, n);
+    float *dY = dev_up(0, y.data, (size_t)n), *dX = dev_up(1, x.data, (size_t)n);
+    k_axpy<<<ceil_div(n, t), t>>>(dY, a, dX, n);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    dev_down(y.data, dY, (size_t)n);
 }
