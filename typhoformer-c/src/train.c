@@ -385,6 +385,22 @@ static int cmd_train(int argc, char **argv) {
     else if (rotframe) printf("decoder: motion-aligned (along/cross-track) correction frame\n");
     model_set_no_spatial(!spatial); model_set_posenc(posenc); model_set_pool_last(pool_last);
     nn_set_prenorm(prenorm); nn_set_timebias(timebias); model_set_co_spatial(co_spatial);
+
+    /* Snapshot the mode flags for the checkpoint header (TFW4). Before this existed,
+     * eval/predict had to be told the decoder variant again by hand -- and the
+     * size-mismatch guard could not catch it being wrong, because --cv/--delta/
+     * --rotframe are parameter-neutral. A cv-trained checkpoint evaluated without
+     * --cv silently reported 5071 km where the truth was 29 km. */
+    unsigned modes = 0;
+    if (gru)        modes |= TF_MODE_GRU;
+    else if (xattn) modes |= TF_MODE_XATTN;
+    else if (cv)    modes |= TF_MODE_CV;
+    else if (delta) modes |= TF_MODE_DELTA;
+    if (rotframe)   modes |= TF_MODE_ROTFRAME;
+    if (!spatial)   modes |= TF_MODE_NO_SPATIAL;
+    if (posenc)     modes |= TF_MODE_POSENC;
+    if (pool_last)  modes |= TF_MODE_POOL_LAST;
+    if (co_spatial) modes |= TF_MODE_CO_SPATIAL;
     /* Loss shaping (globals read by every model_loss call, both training paths). */
     model_set_huber(huber); model_set_hweight(hweight);
     /* Deferred weight-gradient accumulation (--defer_dw): one dW GEMM per layer
@@ -512,7 +528,7 @@ static int cmd_train(int argc, char **argv) {
             /* Persist config + BOTH normalization stat sets (feature mean/std and
              * coordinate cmean/cstd) alongside weights, so eval can reproduce the
              * exact preprocessing. */
-            checkpoint_save3(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, &pl);
+            checkpoint_save4(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, modes, &pl);
             char opath[1024]; snprintf(opath, sizeof opath, "%s.opt", save);
             checkpoint_save_optim(opath, &opt, ep);  /* sidecar for --resume: Adam moments + this epoch number */
         } else if (++since_improve >= patience && patience > 0) {
@@ -524,7 +540,7 @@ static int cmd_train(int argc, char **argv) {
     }
     /* Degenerate case (0 epochs, or nothing ever beat init): still emit a
      * checkpoint so downstream eval/predict have weights to load. */
-    if (best_ep == 0) checkpoint_save3(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, &pl);
+    if (best_ep == 0) checkpoint_save4(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, modes, &pl);
     printf("best val dR %.2f km at epoch %d  ->  saved %s (%ld params)\n",
            best_ep ? best : e0.mkm, best_ep, save, plist_num_params(&pl));
     print_horizons(&best_e);
@@ -577,6 +593,27 @@ static void apply_ckpt_stats(Dataset *ds, const char *weights) {
 }
 
 /* ---- eval ----------------------------------------------------------- */
+/* Read the decoder/architecture modes out of the checkpoint and apply them, so the
+ * caller no longer has to re-specify --cv/--gru/--xattn/--delta by hand. This is the
+ * fix for a real, silent failure: those three are parameter-NEUTRAL, so the
+ * size-mismatch guard in checkpoint_load_params cannot catch them being wrong. A
+ * cv-trained checkpoint evaluated without --cv loaded perfectly and reported
+ * 5071 km where the truth was 29 km (measured 2026-07-14 on the 826-storm set).
+ * Returns the bitfield; 0 for a pre-TFW4 checkpoint, which we warn about loudly
+ * because there the old hazard still applies. */
+static unsigned apply_ckpt_modes(const char *path) {
+    unsigned modes = 0;
+    if (checkpoint_load_modes(path, &modes)) {
+        checkpoint_apply_modes(modes);           /* overrides the CLI: the file knows what it is */
+        printf("decoder/arch (from checkpoint): %s\n", checkpoint_modes_str(modes));
+    } else {
+        printf("WARNING: this checkpoint predates TFW4 and does NOT record its decoder variant.\n"
+               "         Pass the same --cv/--gru/--xattn/--delta/--rotframe flags used at\n"
+               "         train time, or the scores will be silently and badly wrong.\n");
+    }
+    return modes;
+}
+
 /* Load a checkpoint and score it over ALL samples of a dataset (no split — the
  * whole thing is treated as the eval set). Because the architecture flags
  * change the parameter layout, the SAME structural flags used at train time
@@ -632,6 +669,8 @@ static int cmd_eval(int argc, char **argv) {
     if (K == 0) { fprintf(stderr, "eval: empty --weights\n"); return 1; }
 
     Config c = checkpoint_load_config(wlist[0]);     /* dimensions come from the checkpoint, not the CLI */
+    /* ...and so do the decoder/arch modes, as of TFW4. Must precede model_new. */
+    if (apply_ckpt_modes(wlist[0]) & TF_MODE_CO_SPATIAL) co_spatial = 1;
     printf("Loaded config from %s | d_model=%d layers=%d heads=%d d_ff=%d%s\n",
            wlist[0], c.d_model, c.n_layers, c.n_heads, c.d_ff,
            K > 1 ? " (ensemble)" : "");
@@ -765,6 +804,7 @@ static int cmd_predict(int argc, char **argv) {
         else if (!strncmp(argv[i], "--n=", 4))        limit = atoi(argv[i] + 4);
     }
     Config c = checkpoint_load_config(weights);
+    apply_ckpt_modes(weights);                       /* decoder/arch from the header (TFW4); before model_new */
     Dataset ds = load_source(bin, csv, emb, c.in_len, c.pred_len);
     apply_feature_aug(&ds, c.d_num);                 /* re-apply the ckpt's --motion/--physics (width arithmetic) */
     apply_ckpt_stats(&ds, weights);                  /* reproduce train-time normalization */
