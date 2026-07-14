@@ -661,7 +661,7 @@ void dataset_get(const Dataset *d, int s, Mat xnum, Mat xtext, Mat yprev, Mat Y)
  * records) always land in the same split — no window straddles a boundary, and
  * no train record can appear inside a val/test window. The same seed always
  * yields the same partition (reproducibility). */
-Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed) {
+Split dataset_split3(Dataset *d, float val_frac, float test_frac, uint64_t seed) {
     Split sp; memset(&sp, 0, sizeof sp);
     if (d->prewindowed || d->n_storms <= 0 || d->start == NULL) {
         /* No storm/overlap info (.tfb): fall back to a sample-level split.
@@ -669,10 +669,10 @@ Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long 
         int N = d->n_samples;
         int *idx = (int *)malloc((size_t)(N ? N : 1) * sizeof(int));
         for (int i = 0; i < N; ++i) idx[i] = i;
-        unsigned long rng = seed ? seed : 1;
+        uint64_t rng = seed ? seed : 1;
         for (int i = N - 1; i > 0; --i) {
             rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-            int j = (int)(rng % (unsigned long)(i + 1));
+            int j = (int)(rng % (uint64_t)(i + 1));
             int t = idx[i]; idx[i] = idx[j]; idx[j] = t;
         }
         int nv = (int)(val_frac * N), nte = (int)(test_frac * N);
@@ -692,10 +692,10 @@ Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long 
      * deterministic), then slice the shuffled order by fraction. */
     int *order = (int *)malloc((size_t)(S ? S : 1) * sizeof(int));
     for (int i = 0; i < S; ++i) order[i] = i;
-    unsigned long rng = seed ? seed : 1;
+    uint64_t rng = seed ? seed : 1;
     for (int i = S - 1; i > 0; --i) {
         rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-        int j = (int)(rng % (unsigned long)(i + 1));
+        int j = (int)(rng % (uint64_t)(i + 1));
         int t = order[i]; order[i] = order[j]; order[j] = t;
     }
     int nv = (int)(val_frac * S), nte = (int)(test_frac * S);
@@ -740,21 +740,26 @@ void split_free(Split *s) {
  * val_frac as validation, the rest as train. NOT leakage-safe when windows
  * overlap (adjacent windows share records and can land on opposite sides), so
  * it is kept only as a utility; training uses dataset_split3. */
-void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
+void dataset_split(const Dataset *d, float val_frac, uint64_t seed,
                    int **train, int *n_train, int **val, int *n_val) {
     int N = d->n_samples;
     int *idx = malloc(N * sizeof(int));
     for (int i = 0; i < N; ++i) idx[i] = i;
-    unsigned long rng = seed ? seed : 1;              /* xorshift shuffle */
+    uint64_t rng = seed ? seed : 1;              /* xorshift shuffle */
     for (int i = N - 1; i > 0; --i) {
         rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-        int j = (int)(rng % (unsigned long)(i + 1));
+        int j = (int)(rng % (uint64_t)(i + 1));
         int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
     }
     int nv = (int)(val_frac * N);
-    *n_val = nv; *n_train = N - nv;
-    *val = malloc((nv ? nv : 1) * sizeof(int));
-    *train = malloc((N - nv ? N - nv : 1) * sizeof(int));
+    /* Clamp: an out-of-range val_frac must not make (N - nv) negative, which would
+     * wrap to a huge size_t in the malloc below (gcc flags exactly this). */
+    if (nv < 0) nv = 0;
+    if (nv > N) nv = N;
+    int nt = N - nv;
+    *n_val = nv; *n_train = nt;
+    *val   = malloc((size_t)(nv ? nv : 1) * sizeof(int));
+    *train = malloc((size_t)(nt ? nt : 1) * sizeof(int));
     for (int i = 0; i < nv; ++i) (*val)[i] = idx[i];
     for (int i = nv; i < N; ++i) (*train)[i - nv] = idx[i];
     free(idx);

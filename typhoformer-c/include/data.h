@@ -15,6 +15,8 @@
 #ifndef TYPHOFORMER_DATA_H
 #define TYPHOFORMER_DATA_H
 
+#include <stdint.h>
+
 #include "tensor.h"
 
 /*
@@ -104,7 +106,7 @@ typedef struct {
 
 /* Deterministic STORM-level split: whole storms go to train/val/test, so
  * overlapping windows never straddle splits. Records d->storm_split. */
-Split dataset_split3(Dataset *d, float val_frac, float test_frac, unsigned long seed);
+Split dataset_split3(Dataset *d, float val_frac, float test_frac, uint64_t seed);
 void  split_free(Split *s);
 
 /* Append motion features to the input: per record, the (raw) position lat, lon
@@ -152,7 +154,7 @@ void dataset_denorm(const Dataset *d, float *latlon);
 
 /* Legacy 2-way sample-level split (deterministic shuffle). Kept as a utility;
  * NOT leakage-safe for overlapping windows — use dataset_split3 for training. */
-void dataset_split(const Dataset *d, float val_frac, unsigned long seed,
+void dataset_split(const Dataset *d, float val_frac, uint64_t seed,
                    int **train, int *n_train, int **val, int *n_val);
 
 void dataset_free(Dataset *d);

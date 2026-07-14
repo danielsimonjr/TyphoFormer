@@ -35,6 +35,12 @@ jobs:
 
       - name: Smoke test (train serial + multicore, eval, prepare, predict, baseline, bench)
         run: |
+          # `test-san` above leaves ASan/UBSan-instrumented .o files behind (it does
+          # `make clean && make SAN=1 test`). Without a clean here, make sees those
+          # objects as up to date and merely RELINKS them -- without -fsanitize -- so
+          # the link dies on undefined __asan_* / __ubsan_* symbols. This is why
+          # build-test had been red on main since 2026-07-12.
+          make clean
           make CC=${{ matrix.cc }}
           ./typhoformer 1 --save=/tmp/m.ckpt
           ./typhoformer 1 --threads=4 --save=/tmp/mp.ckpt
