@@ -761,25 +761,39 @@ non-trivial reduction (CUDA does it with `atomicAdd` across every row of a colum
 A backend could pass every other op and still get it wrong. All three are now in
 the shared check (colsum 1.19e-07; copy and zero exact).
 
-**A full training run is NOT bit-reproducible across backends — and that is §11,
-live.** Seed 1 of the §15 recipe (30 epochs, `--pred_len=8`, 826 storms) was
-trained end-to-end on both backends. They start **bit-identical** — the untrained
-model scores val ΔR 221.94 km on each — but by epoch 1 the val curves already part
-(232.8 vs 246.3 km) and they keep diverging. The reason is not a bug: SGD is
-chaotic, so the per-op 1e-7 kernel differences compound over ~7,400 gradient steps
-an epoch, and the two weight trajectories separate even though every individual
-operation still agrees to 1e-7. Both runs then find essentially the **same best
-val** (CPU 215.20 vs CUDA 215.97 km, 0.4% apart) — the model quality is identical —
-but early stopping, on the flat val landscape §15 documented, selects **different
-epochs** (CPU epoch 16, CUDA epoch 5), and those two checkpoints give held-out
-per-horizon curves ~3% apart (CUDA 31.2/122.5/471.3 vs CPU 32.3/125.6/487.9 km at
-6h/18h/48h). This is exactly the sensitivity §11 built the multi-seed methodology
-around: swapping CPU→CUDA is a float-rounding-level perturbation, and it moved the
-single-seed result by ~3% and flipped the selected epoch — which is precisely why
-§15 reports **five-seed means, never single-seed numbers**. The qualitative result
-(the per-horizon shape, the CLIPER-beating crossover) reproduces on the GPU; the
-exact single-seed km values are not backend-reproducible, by the nature of the
-optimisation, not any fault of the port.
+**A full training run is NOT bit-reproducible across backends — and the divergence
+is IMPLEMENTATION, not hardware.** Seed 1 of the §15 recipe (30 epochs,
+`--pred_len=8`, 826 storms) was trained end-to-end on three backends: native CPU
+(gcc), CUDA (Quadro P1000), and OpenCL via POCL — which runs on the **same CPU** as
+the native build.
+
+| seed-1 (held-out test ΔR km) | 6h | 18h | 48h | mean | best val | epoch |
+|:--|:--:|:--:|:--:|:--:|:--:|:--:|
+| CPU (gcc)        | 32.34 | 125.63 | 487.90 | 236.87 | 215.20 | 16 |
+| CUDA (P1000)     | 31.22 | 122.47 | 471.27 | 229.22 | 215.97 | 5 |
+| OpenCL (POCL/CPU)| 32.14 | 120.92 | 475.58 | 229.89 | 217.81 | 4 |
+
+All three start **bit-identical** (untrained val ΔR 221.94 km) but the trajectories
+part by epoch 1 and keep diverging. The reason is not a bug: SGD is chaotic, so the
+per-op 1e-7 kernel differences compound over ~7,400 gradient steps an epoch and the
+weight paths separate, even though every op still agrees to 1e-7 (the cross-check).
+All three find nearly the same best val (215.2 / 216.0 / 217.8) but early stopping,
+on the flat val landscape §15 documented, picks **different epochs** (16 / 5 / 4),
+and those checkpoints score ~3% apart.
+
+The OpenCL row is the clean control. **It runs on the identical CPU to the native
+build**, so its ~3% divergence from native cannot be a hardware effect — it isolates
+the cause to the *kernel implementation* (POCL's OpenCL codegen rounds the seam ops
+differently than gcc's C). Swapping the backend is a float-rounding-level
+perturbation whether or not the hardware changes. That is exactly the sensitivity
+§11 built the multi-seed methodology around, and precisely why §15 reports
+**five-seed means, never single-seed numbers**. (Suggestively, the two seam
+backends — CUDA and OpenCL, which share a one-thread-per-element kernel structure —
+landed nearer each other, 229.2 vs 229.9, than to native's cache-blocked matmul,
+236.9; but that is n=1 on a flat landscape and could be coincidence — five seeds
+would tell.) The qualitative result (the per-horizon shape, the CLIPER-beating
+crossover) reproduces on every backend; the exact single-seed km values are not
+backend-reproducible, by the nature of the optimisation, not any fault of a port.
 
 **And a negative performance result, which is the honest headline.** This backend
 is a **correctness reference, not a speed win**. The model is tiny (`d_model=64`,
