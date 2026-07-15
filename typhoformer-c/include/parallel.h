@@ -15,7 +15,8 @@
  * neighbour tables (consumed by --co_spatial) — so all decoder variants and the
  * co-spatial branch train data-parallel. Replicas are constructed from the same
  * architecture globals as the master (set the model_set_* flags BEFORE
- * partrainer_new). The one serial-only training flag left is --km_loss.
+ * partrainer_new). All loss shaping — including --km_loss — lives in model_loss,
+ * so both paths apply it identically; no training flag is serial-only.
  *
  * Numerical note: the reduced gradient equals the serial gradient up to
  * floating-point summation order (the batch is summed in a different order), so

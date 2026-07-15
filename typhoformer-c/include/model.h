@@ -261,8 +261,14 @@ double model_loss(const Mat pred, const Mat Y, const Mat gate, float lambda,
  *                         residual (quadratic core == MSE inside |r|<=δ, linear
  *                         tails outside). δ=0 disables (plain MSE).
  *   model_set_hweight(γ): weight forecast step h by (h+1)^γ, normalized to
- *                         mean 1 — γ>0 upweights long horizons. γ=0 disables. */
+ *                         mean 1 — γ>0 upweights long horizons. γ=0 disables.
+ *   model_set_km_loss(on, clat_mean, clat_std, clon_std): equirectangular km
+ *                         objective — scales the longitude residual by
+ *                         (clon_std/clat_std)·cos(lat) so the loss approximates
+ *                         squared kilometre error (see model.c). Pass the TRAIN-set
+ *                         coordinate stats. on=0 disables (bit-identical to MSE). */
 void model_set_huber(float delta);
 void model_set_hweight(float gamma);
+void model_set_km_loss(int on, float clat_mean, float clat_std, float clon_std);
 
 #endif /* TYPHOFORMER_MODEL_H */

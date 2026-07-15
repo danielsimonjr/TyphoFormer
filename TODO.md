@@ -61,10 +61,14 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       compounds over the rollout, so it pays off at long range. Extends the recipe's margin
       over CLIPER from 7.1 to 14.0 km at 6–48h. Opt-in (neutral at 6h, changes training
       behavior); bit-neutral when off. Honest SEM caveat ~1.6σ.
-- [ ] **4. Great-circle (km) loss (accuracy · MEDIUM).** `--km_loss` exists but is
-      serial-only and *equirectangular* (cos²(lat) lon reweight), not true haversine.
-      Make it work under `--threads=N`, optionally upgrade to exact great-circle, and
-      test five-seed vs MSE. Aligns the objective with the ΔR metric it's scored on.
+- [x] **4. Great-circle (km) loss (accuracy · MEDIUM).** **Done — reworked + measured
+      NEUTRAL (FINDINGS §21).** Rebuilt `--km_loss` from a serial-only *inconsistent*
+      gradient hack into a proper equirectangular km objective in `model_loss`: consistent
+      loss+gradient (gradient-checked), both training paths (no longer serial-only). Chose
+      equirectangular over haversine deliberately (haversine's gradient is singular at
+      pred→true). Measured 5-seed: neutral at 6h (−0.5, 2/5) AND 48h (+1.6 ± 11, 3/5, 0.3σ)
+      — the `--cv` anchor + short-range steps put the km and MSE optima nearly together.
+      **Kept** (repairs a broken flag, unlike Item 2's reverted new complexity), off by default.
 - [ ] **5. Direct multi-horizon head (speed + accuracy · MEDIUM-HARD).** The decoder
       rolls out 48h in 8 sequential steps, compounding error. Predict all 8 horizons in
       one shot from the encoder context (no rollout) — fewer ops *and* no error

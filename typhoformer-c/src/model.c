@@ -831,8 +831,26 @@ void model_free(Model *m) {
  *            the km error budget; 0 = uniform. */
 static float g_huber = 0.0f;
 static float g_hweight = 0.0f;
+/* g_km_loss: equirectangular great-circle (km) objective. The loss is scored on
+ * spherical ΔR (kilometres) but trained on normalized-coordinate MSE — a mismatch,
+ * because a normalized unit of longitude is a different number of kilometres than a
+ * normalized unit of latitude (different train-set std) AND longitude kilometres
+ * shrink by cos(lat) toward the poles. This scales the LONGITUDE residual by
+ * (cstd_lon/cstd_lat)·cos(lat) so the objective becomes, up to a global constant,
+ * the squared kilometre error. Latitude is the reference (weight 1). Both the loss
+ * term and its gradient are reweighted consistently (unlike the old serial-only
+ * gradient-reweight hack), and it lives in model_loss so BOTH the serial and the
+ * data-parallel paths use it. The small-angle equirectangular form is deliberate:
+ * the exact haversine gradient carries a 1/sin(d) factor that blows up as pred→true
+ * (d→0), i.e. exactly at convergence — a poor training loss. cmean/cstd are the
+ * TRAIN-set coordinate stats (leakage-safe), injected via model_set_km_loss. */
+static int   g_km_loss = 0;
+static float g_km_clat_mean = 0.0f, g_km_clat_std = 1.0f, g_km_clon_std = 1.0f;
 void model_set_huber(float delta) { g_huber = delta; }
 void model_set_hweight(float g)   { g_hweight = g; }
+void model_set_km_loss(int on, float clat_mean, float clat_std, float clon_std) {
+    g_km_loss = on; g_km_clat_mean = clat_mean; g_km_clat_std = clat_std; g_km_clon_std = clon_std;
+}
 
 /* Loss = mean_i w(i)·huber(pred_i − Y_i) + lambda·mean( relu(0.6 - gate)^2 ).
  * With both options off this reduces exactly to the original
@@ -858,16 +876,26 @@ double model_loss(const Mat pred, const Mat Y, const Mat gate, float lambda,
         for (int j = 0; j < C; ++j) {
             const int i = h * C + j;
             double r = pred.data[i] - Y.data[i];
-            double term, grad;
-            if (g_huber > 0.0f && fabs(r) > (double)g_huber) {   /* linear tail */
-                term = (double)g_huber * (2.0 * fabs(r) - (double)g_huber);
-                grad = 2.0 * (double)g_huber * (r > 0 ? 1.0 : -1.0);
+            /* km-loss: reweight the longitude residual to kilometres (lat = reference,
+             * weight 1). kw==1 when km-loss is off, so this path is then bit-identical
+             * to normalized MSE/Huber. reff is the km-weighted residual; the gradient
+             * w.r.t. pred picks up an extra factor kw by the chain rule (reff = kw·r). */
+            double kw = 1.0;
+            if (g_km_loss && j == 1 && C >= 2) {                 /* longitude channel */
+                double lat_deg = (double)Y.data[h * C] * g_km_clat_std + g_km_clat_mean;
+                kw = (g_km_clon_std / g_km_clat_std) * cos(lat_deg * 0.017453292519943295);
+            }
+            double reff = kw * r;
+            double term, grad;                                   /* grad = d(term)/d(reff) */
+            if (g_huber > 0.0f && fabs(reff) > (double)g_huber) {/* linear tail */
+                term = (double)g_huber * (2.0 * fabs(reff) - (double)g_huber);
+                grad = 2.0 * (double)g_huber * (reff > 0 ? 1.0 : -1.0);
             } else {                                             /* quadratic core (== MSE) */
-                term = r * r;
-                grad = 2.0 * r;
+                term = reff * reff;
+                grad = 2.0 * reff;
             }
             err += w * term;
-            if (dpred.data) dpred.data[i] = (float)(w * grad / (double)No);
+            if (dpred.data) dpred.data[i] = (float)(w * grad * kw / (double)No);  /* chain: ×kw */
         }
     }
     err /= (double)No;
