@@ -251,6 +251,7 @@ static int cmd_train(int argc, char **argv) {
     int rotframe = 0;                 /* cv correction in the motion-aligned (along/cross-track) frame */
     int gru = 0;                      /* cv + a recurrent GRU memory over horizons (implies cv) */
     int xattn = 0;                    /* cv + decoder cross-attention over the encoder sequence (implies cv) */
+    int direct = 0;                   /* direct multi-horizon head: all steps at once, seed-CV anchored (no rollout) */
     int km_loss = 0;                  /* equirectangular km objective in model_loss (both paths); see model_set_km_loss */
     /* Encoder structural options (see cmd_eval — each must be re-passed to
      * evaluate a checkpoint trained with it, since they alter the param set).
@@ -298,6 +299,7 @@ static int cmd_train(int argc, char **argv) {
         /* --gru and --xattn each force cv=1 too: they are curvature corrections
          * layered on top of the constant-velocity anchor, not standalone modes. */
         else if (!strcmp(argv[i], "--cv"))             cv = 1;
+        else if (!strcmp(argv[i], "--direct"))         direct = 1;   /* direct multi-horizon head (excludes cv/gru/xattn) */
         else if (!strcmp(argv[i], "--rotframe"))     { rotframe = 1; cv = 1; }  /* implies the cv anchor */
         else if (!strcmp(argv[i], "--gru"))          { gru = 1; cv = 1; }
         else if (!strcmp(argv[i], "--xattn"))        { xattn = 1; cv = 1; }
@@ -366,7 +368,8 @@ static int cmd_train(int argc, char **argv) {
            motion ? " (+motion)" : "", physics ? " (+physics)" : "", no_text ? " | NO-TEXT" : "");
     /* Announce the active decoder branch. The order mirrors precedence below:
      * gru → xattn → cv → delta, each printed only if the higher ones are off. */
-    if (gru)        printf("decoder: constant-velocity + GRU memory (recurrent curvature)\n");
+    if (direct)     printf("decoder: direct multi-horizon head (all steps at once, seed-CV anchored, no rollout)\n");
+    else if (gru)   printf("decoder: constant-velocity + GRU memory (recurrent curvature)\n");
     else if (xattn) printf("decoder: constant-velocity + cross-attention over encoder sequence\n");
     else if (cv)    printf("decoder: constant-velocity mode (anchor at CLIPER, learn curvature)\n");
     else if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
@@ -377,7 +380,8 @@ static int cmd_train(int argc, char **argv) {
      * These are process-global toggles read when model_new() allocates params,
      * so they MUST be established before construction and re-established (via the
      * same flags) whenever the resulting checkpoint is later loaded for eval. */
-    if (gru)        model_set_gru(1);         /* gru/xattn anchor at cv in their own branch (own curvature params) */
+    if (direct)     model_set_direct(1);      /* direct head is exclusive; takes precedence over cv/gru/xattn */
+    else if (gru)   model_set_gru(1);         /* gru/xattn anchor at cv in their own branch (own curvature params) */
     else if (xattn) model_set_xattn(1);
     else if (cv)    model_set_cv(1);          /* cv is a superset of delta; takes precedence */
     else if (delta) model_set_delta(1);
@@ -393,7 +397,8 @@ static int cmd_train(int argc, char **argv) {
      * --rotframe are parameter-neutral. A cv-trained checkpoint evaluated without
      * --cv silently reported 5071 km where the truth was 29 km. */
     unsigned modes = 0;
-    if (gru)        modes |= TF_MODE_GRU;
+    if (direct)     modes |= TF_MODE_DIRECT;
+    else if (gru)   modes |= TF_MODE_GRU;
     else if (xattn) modes |= TF_MODE_XATTN;
     else if (cv)    modes |= TF_MODE_CV;
     else if (delta) modes |= TF_MODE_DELTA;
@@ -501,7 +506,7 @@ static int cmd_train(int argc, char **argv) {
                     dataset_get(&ds, train[b + k], xn, xt, yp, Y);
                     /* Serial-path-only auxiliary inputs, matched in evaluate(): */
                     if (co_spatial) { int nc; dataset_neighbors(&ds, train[b + k], nbr, &nc); model_set_neighbors(&m, nbr, nc); }
-                    if (cv) { dataset_seed_velocity(&ds, train[b + k], vel); model_set_seed_velocity(&m, vel); }
+                    if (cv || direct) { dataset_seed_velocity(&ds, train[b + k], vel); model_set_seed_velocity(&m, vel); }
                     if (tf_epochs > 0) model_set_teacher(&m, Y);   /* rollout state correction targets */
                     model_forward(&m, xn, xt, yp);
                     /* Forward loss and its gradients (dpred, dgate) for one sample. */

@@ -69,10 +69,15 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       pred→true). Measured 5-seed: neutral at 6h (−0.5, 2/5) AND 48h (+1.6 ± 11, 3/5, 0.3σ)
       — the `--cv` anchor + short-range steps put the km and MSE optima nearly together.
       **Kept** (repairs a broken flag, unlike Item 2's reverted new complexity), off by default.
-- [ ] **5. Direct multi-horizon head (speed + accuracy · MEDIUM-HARD).** The decoder
-      rolls out 48h in 8 sequential steps, compounding error. Predict all 8 horizons in
-      one shot from the encoder context (no rollout) — fewer ops *and* no error
-      accumulation. New head + hand-written backward, gradient-checked; compare per-horizon.
+- [x] **5. Direct multi-horizon head (speed + accuracy · MEDIUM-HARD).** **Done — SHIPPED
+      as `--direct`, the roadmap's BIGGEST win (FINDINGS §22).** Predicts all horizons at
+      once (no rollout), anchored at seed-CV. Refuted my prediction that the AR recurrence
+      would win: direct beats `--cv` at 6h (32.1 vs 35.2, ties CLIPER, σ 0.86 vs 2.71) AND
+      48h (−10.2 km 6–48h mean, 5/5 seeds, ~4.8σ), worse on no seed, and faster. Erases the
+      "loses at 6h" caveat; widens the CLIPER margin 7.1→17.2 km. First architecture change
+      that helps — removes rollout error compounding rather than adding capacity. Gradient-
+      checked. **Candidate to replace `--cv` as the default decoder (ADR — surfaced to Daniel).**
+      ⏭ open: does it stack with SWA (§20)?
 - [ ] **6. Probabilistic / NLL uncertainty head (accuracy · HARD).** TC forecasting is
       the cone, not a point. Heteroscedastic/NLL head outputs calibrated uncertainty;
       NLL often sharpens the point forecast too. Extends the §13 seed-ensemble work.

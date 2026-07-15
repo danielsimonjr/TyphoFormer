@@ -120,6 +120,13 @@ int main(void) {
     fail |= check_model("cv+teacher-forced", 3);
     model_set_tf_prob(0.0f); nn_set_training(0); nn_set_dropout(0.1f);
     model_set_cv(0);
+    /* direct multi-horizon head: no rollout, all steps predicted at once from the
+     * pooled context and anchored at seed-CV. Multistep exercises the flat
+     * [1, steps*O] fc2 output and its single-shot backward through fc2/relu/fc1. */
+    model_set_direct(1);
+    fail |= check_model("direct", 1);
+    fail |= check_model("direct+multistep", 3);
+    model_set_direct(0);
     model_set_gru(1);
     fail |= check_model("gru", 1);
     fail |= check_model("gru+multistep", 3);

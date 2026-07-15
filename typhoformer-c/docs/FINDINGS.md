@@ -1068,6 +1068,55 @@ inconsistent serial-only hack. It stays **off by default** and is documented as
 measured-neutral. The finding is the measurement; the deliverable is a correct kernel
 that no longer misleads whoever reaches for it next.
 
+## 22. The direct multi-horizon head — the prediction was wrong, and it is the biggest win
+
+Roadmap Item 5, and the one that overturned a prior. **Architecture had been neutral
+for the entire project** — the encoder sweeps (§3, §7, §8), `--gru`/`--xattn` (§11,
+§15, parity-or-worse), `--rotframe` (§13), the capacity sweep (§18). So the honest
+expectation for a new decoder was neutral. I went further and predicted it would be
+*worse*: the autoregressive `--cv` head threads a velocity that evolves across the
+rollout (`v += c` each step), which looked like a load-bearing inductive bias for
+smoothly-curving tracks. The direct head throws that recurrence away — it predicts all
+`pred_len` corrections in one shot from the pooled context, each anchored at the *seed*
+constant-velocity extrapolation `ŷ_s = p0 + (s+1)·v0` (fc2 zero-init → untrained emits
+pure seed-CV, same as `--cv`). No rollout, no state threading.
+
+**The measurement refuted the prediction, decisively.** Recipe (`--motion --physics
+--huber=0.1`), `--cv` vs `--direct`, 5 seeds, paired:
+
+| horizon | AR `--cv` | `--direct` | paired Δ | direct wins |
+|:--|:--:|:--:|:--:|:--:|
+| 6h (`--pred_len=1`) | 35.22 ± 2.71 | **32.13 ± 0.86** | +3.09 | 4/5 (1 tie) |
+| 6–48h mean (`--pred_len=8`) | 227.9 ± 9.6 | **217.8 ± 8.7** | **+10.16** | **5/5** |
+
+The direct head is better at **both** horizons, worse on **no** seed, with the 48h win
+robust at 5/5 (per-seed +1.7 / +13.7 / +9.2 / +15.4 / +10.9; SEM ≈ 2.1 → ~4.8σ) — and a
+**dramatically tighter 6h spread (σ 0.86 vs 2.71)**: it is not just better, it is more
+*reliable*. It is also **faster** — one Linear over the context instead of an eight-step
+sequential rollout.
+
+**Why it wins, and why I was wrong.** The AR head's "recurrence" compounds two things
+over the rollout: the learned curvature (helpful) and the prediction error (harmful). At
+an eight-step horizon the error compounding dominates — a bad step-3 prediction corrupts
+every later step through the threaded state. The direct head predicts each horizon
+independently from the fixed encoder context, so errors do not propagate. The evolving
+velocity I bet on was real, but it was outweighed. This is the **first architecture
+change that improves the model** — and it does so not by adding capacity (the pattern
+that was always neutral) but by *removing a failure mode*.
+
+**It also erases the model's one standing weakness.** §14–15's honest caveat was "we lose
+at 6h" (recipe cv 35.2 vs split-matched CLIPER 32.0). The direct head scores **32.13 at
+6h — level with CLIPER** — while widening the 6–48h margin over CLIPER from 7.1 km to
+**17.2 km** (217.8 vs 235.0). For the first time the model is not behind dead-reckoning at
+any horizon.
+
+Shipped as `--direct` (gradient-checked — `direct` and `direct+multistep` FD-pass; golden
+unchanged when off; checkpoint records `TF_MODE_DIRECT` and eval self-configures; runs on
+serial and `--threads=N` alike). **This is a strong candidate to replace `--cv` as the
+recommended decoder** — a headline-recipe change is left as a deliberate call rather than
+folded in silently, but the evidence is one-directional. Next open question: whether it
+stacks with SWA (§20), the other long-horizon win.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above

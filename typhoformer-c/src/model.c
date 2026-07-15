@@ -22,6 +22,16 @@ int  model_delta(void) { return g_delta; }
 static int g_cv = 0;
 void model_set_cv(int on) { g_cv = on; }
 
+/* Direct multi-horizon decoder. Instead of rolling the correction out one step at
+ * a time (feeding each prediction back in), it predicts ALL pred_len corrections in
+ * a single shot from the pooled encoder context, each anchored at the seed
+ * constant-velocity extrapolation ŷ_s = p0 + (s+1)·v0. Trades the AR head's
+ * evolving-velocity recurrence for immunity to error compounding and a parallel
+ * (rollout-free) decode. fc2 is zero-init, so an untrained model emits pure seed-CV,
+ * exactly like the cv head. Mutually exclusive with cv/gru/xattn. Off by default. */
+static int g_direct = 0;
+void model_set_direct(int on) { g_direct = on; }
+
 /* Motion-aligned frame for the cv correction (parameter-free; changes NO
  * parameter layout, so checkpoints are interchangeable — but eval must use the
  * same flag or the correction is interpreted in the wrong frame). The MLP's
@@ -304,7 +314,7 @@ void encoder_free(Encoder *e) {
  * physical baseline and gradient descent only has to learn the residual. */
 Decoder decoder_new(const Config *c, ParamList *pl) {
     Decoder d; d.hidden = c->d_model; d.out = c->out_dim; d.max_steps = c->pred_len;
-    d.use_cv = g_cv; d.use_gru = g_gru; d.use_xattn = g_xattn;
+    d.use_cv = g_cv; d.use_gru = g_gru; d.use_xattn = g_xattn; d.use_direct = g_direct;
     /* rotframe applies to the plain cv head only (out_dim 2 by construction). */
     d.use_rotframe = (g_rotframe && g_cv && !g_gru && !g_xattn && c->out_dim == 2);
     d.frc = d.use_rotframe ? (Mat *)calloc(c->pred_len, sizeof(Mat)) : NULL;
@@ -325,6 +335,14 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
         d.fc_out = linear_new(c->d_model, c->out_dim, pl, "dec.fc_out");
         memset(d.fc_out.W.data, 0, (size_t)d.fc_out.out * d.fc_out.in * sizeof(float));
         memset(d.fc_out.b, 0, (size_t)d.fc_out.out * sizeof(float));
+    } else if (g_direct) {
+        /* Direct head: fc1 maps the pooled context h -> d_model, fc2 -> ALL
+         * pred_len*out_dim corrections at once (zero-init -> untrained emits pure
+         * seed-CV). No per-step state, so fc1's input is just h. */
+        d.fc1 = linear_new(c->d_model, c->d_model, pl, "dec.fc1");
+        d.fc2 = linear_new(c->d_model, c->pred_len * c->out_dim, pl, "dec.fc2");
+        memset(d.fc2.W.data, 0, (size_t)d.fc2.out * d.fc2.in * sizeof(float));
+        memset(d.fc2.b, 0, (size_t)d.fc2.out * sizeof(float));
     } else {
         /* cv mode also feeds the current velocity, so fc1's input is [h; y_prev; v]. */
         int fc1_in = c->d_model + c->out_dim + (g_cv ? c->out_dim : 0);
@@ -356,6 +374,25 @@ Decoder decoder_new(const Config *c, ParamList *pl) {
 void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vseed, int steps, Mat preds) {
     const int H = d->hidden, O = d->out;
     assert(steps <= d->max_steps);
+    if (d->use_direct) {
+        /* Direct multi-horizon head (no rollout). corr = fc2(relu(fc1(h))) yields
+         * ALL steps*O corrections in one shot; each horizon is anchored at the seed
+         * constant-velocity extrapolation p0 + (s+1)·v0. zc[0]/h1c[0]/ac[0] cache
+         * the fc1 input, pre-relu, and relu activation for the backward. */
+        ensure(&d->zc[0], 1, H); ensure(&d->h1c[0], 1, H); ensure(&d->ac[0], 1, H);
+        ensure(&d->s_ytn, 1, d->max_steps * O);              /* fc2 emits max_steps*O; read only steps*O */
+        mat_copy(d->zc[0], henc);                            /* fc1 input = pooled context */
+        linear_forward(&d->fc1, d->zc[0], d->h1c[0]);        /* pre-relu */
+        mat_copy(d->ac[0], d->h1c[0]); mat_relu(d->ac[0]);   /* relu activation */
+        linear_forward(&d->fc2, d->ac[0], d->s_ytn);         /* corr [1, steps*O] */
+        for (int s = 0; s < steps; ++s)
+            for (int i = 0; i < O; ++i) {
+                double v0 = vseed.data ? (double)vseed.data[i] : 0.0;
+                preds.data[s * O + i] = (float)((double)yprev.data[i] + (s + 1) * v0
+                                                + (double)d->s_ytn.data[s * O + i]);
+            }
+        return;
+    }
     if (d->use_xattn) {
         /* Constant-velocity rollout whose context is per-step cross-attention over
          * the encoder sequence (memory set by the model via xattn_set_memory).
@@ -506,6 +543,19 @@ void decoder_forward(Decoder *d, const Mat henc, const Mat yprev, const Mat vsee
  * next step's decoder input, so gradients from step s+1 flow back into it. */
 void decoder_backward(Decoder *d, const Mat dpreds, Mat dhenc) {
     const int H = d->hidden, O = d->out, steps = dpreds.rows;
+    if (d->use_direct) {
+        /* Direct head backward. The anchor p0+(s+1)·v0 is constant w.r.t. params and
+         * context, so d(pred)/d(corr) = 1: the correction grad is just dpreds,
+         * viewed flat as [1, steps*O]. Backprop through fc2 -> relu -> fc1 -> dhenc.
+         * xcache is restored from the forward caches before each linear_backward. */
+        ensure(&d->s_da, 1, H); ensure(&d->s_dh1, 1, H);
+        Mat dcorr = dpreds; dcorr.rows = 1; dcorr.cols = steps * O;   /* flat view */
+        Mat da = d->s_da, dh1 = d->s_dh1;
+        mat_copy(d->fc2.xcache, d->ac[0]); linear_backward(&d->fc2, dcorr, da);
+        for (int i = 0; i < H; ++i) dh1.data[i] = (d->h1c[0].data[i] > 0.0f) ? da.data[i] : 0.0f;
+        mat_copy(d->fc1.xcache, d->zc[0]); linear_backward(&d->fc1, dh1, dhenc);
+        return;
+    }
     if (d->use_xattn) {
         /* Backward of the cross-attention cv rollout. dp/dv threading matches cv;
          * fc1's context-grad (dz[0:H]) drives the per-step cross-attention backward,
