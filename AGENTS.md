@@ -16,6 +16,7 @@ Shared data at the repo root: `HURDAT_2new_3000.csv` (raw records, 2020–2024),
 - **`TODO.md`** is the task list for new/pending work. When starting a task that matches an item, work from it; check the item off (`- [x]`) when it's done and delete stale entries. Add newly discovered follow-up work as new items.
 - **`CHANGELOG.md`** follows Keep a Changelog: record every notable codebase change under `[Unreleased]` (categories: Added / Changed / Fixed / Docs) as part of the same commit or PR that makes the change.
 - Experimental results — including negative ones — go in `typhoformer-c/docs/FINDINGS.md`, not the changelog.
+- **`MEMORY.md`** (repo root) — durable project memory: the load-bearing invariants, decisions, and hard-won traps that aren't obvious from the code (e.g. RNG must be `uint64_t`, `Mat.data` stays host-resident, GEMM sample-batching is a measured dead end). Read it before non-trivial work; add to it when you learn something that would cost the next person hours.
 
 ## Commands (typhoformer-c/)
 

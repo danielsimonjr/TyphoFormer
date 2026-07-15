@@ -836,6 +836,25 @@ CPU, OpenCL and CUDA and agrees to 1e-07 — but deliberately not *exploited*. T
 mirrors §7 from the other side: knowing where the time goes matters more than adding
 hardware, and here the time is in the transfers a narrow seam forces, not the maths.
 
+**The CPU's own "biggest speed lever" is also a mirage — measured.** The standing
+plan (in `TODO.md`) was to stack the minibatch into one `[B·T, d]` GEMM instead of
+running B per-sample `[T, d]` GEMMs, on the premise that the weights are "re-streamed
+per sample." GEMMs are worth attacking — they are **52%** of forward+backward at the
+recipe config (`d_model=64`) and **62%** at `--full` — so the lever looked real. It
+is not. `mat_matmul` is `ikj`-order: it reads each weight row **once per OUTPUT row**.
+Eight `[12,k]@[k,n]` GEMMs produce 96 output rows; one stacked `[96,k]@[k,n]` produces
+the same 96 — identical weight traffic, so grouping the samples changes nothing.
+Measured with the repo's own kernel (i7-8850H, `-O3 -march=native`), batched vs.
+separate: recipe shapes 64×64 / 64×128 / 128×64 → **1.04× / 0.87× / 0.57×** (the last
+is 1.75× *slower* batched, from the larger operands blowing the L1 working set), and
+even `--full`-scale weights (256×1024, 1 MB, spilling L2→L3) → **≤1.03×**. Sample
+batching cannot claim any of the 52%. The only real GEMM lever is a register-blocked
+microkernel — tile the `m` loop so a block of output rows reuses each `B[p][:]` from
+registers — a different, localized change with an uncertain payoff, and not attempted:
+CPU training is already ~14 min. Recording this (with the numbers) so the invasive
+batch-the-encoder refactor is never re-proposed on the false premise; measuring the
+premise cost minutes and saved days.
+
 **Methodological note.** "It compiles" is not "it runs", and one platform is not
 all platforms. Both bugs sat behind green CI for the entire life of the project.
 The gates that would have caught them — a Windows build, and an *executing* CUDA
