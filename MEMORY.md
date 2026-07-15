@@ -36,8 +36,14 @@ cost hours, and it isn't already stated somewhere better.
   margin over CLIPER; opt-in, bit-neutral when off (FINDINGS §20). (4) km-aligned loss —
   reworked `--km_loss` into a proper both-paths gradient-checked equirectangular objective,
   but **measured NEUTRAL** (§21): the `--cv` anchor + short-range steps put km and MSE
-  optima nearly together. Kept (off) as a correct flag. Next: multi-horizon head (Item 5),
-  uncertainty, and data/physics levers.
+  optima nearly together. Kept (off) as a correct flag. (5) **`--direct` multi-horizon head
+  — the BIGGEST win and the first architecture change that helps (§22).** Predicts all
+  horizons at once (no autoregressive rollout), so no error compounding: beats `--cv` at
+  6h (32.1 vs 35.2 — **ties CLIPER**, erasing the "loses at 6h" caveat) AND 48h (−10.2 km
+  6–48h mean, **5/5 seeds**, ~4.8σ), tighter variance, faster. Refuted my prediction that
+  the AR evolving-velocity recurrence would win. **Strong candidate to replace `--cv` as
+  the default decoder — ADR, needs Daniel's OK.** Next: uncertainty head (Item 6), then
+  the data/physics levers (7–8, need external data). ⏭ does `--direct` stack with `--swa`?
 
 ---
 

@@ -66,6 +66,7 @@ void   checkpoint_save3(const char *path, Config c, const float *mean, const flo
 #define TF_MODE_POSENC     (1u << 6)   /* model_set_posenc     */
 #define TF_MODE_POOL_LAST  (1u << 7)   /* model_set_pool_last  */
 #define TF_MODE_CO_SPATIAL (1u << 8)   /* model_set_co_spatial */
+#define TF_MODE_DIRECT     (1u << 9)   /* model_set_direct     */
 
 /* Write a TFW4 checkpoint: TFW3 plus the mode bitfield. This is what training
  * writes; the older savers remain for the tests and for back-compat. */

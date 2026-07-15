@@ -351,6 +351,7 @@ int checkpoint_load_modes(const char *path, unsigned *modes) {
 void checkpoint_apply_modes(unsigned modes) {
     model_set_delta     (!!(modes & TF_MODE_DELTA));
     model_set_cv        (!!(modes & TF_MODE_CV));
+    model_set_direct    (!!(modes & TF_MODE_DIRECT));
     model_set_gru       (!!(modes & TF_MODE_GRU));
     model_set_xattn     (!!(modes & TF_MODE_XATTN));
     model_set_rotframe  (!!(modes & TF_MODE_ROTFRAME));
@@ -364,7 +365,8 @@ const char *checkpoint_modes_str(unsigned modes) {
     static char buf[128];
     buf[0] = '\0';
     /* Decoder head first (mutually exclusive), then the modifiers. */
-    if      (modes & TF_MODE_GRU)   strcat(buf, "gru");
+    if      (modes & TF_MODE_DIRECT) strcat(buf, "direct");
+    else if (modes & TF_MODE_GRU)   strcat(buf, "gru");
     else if (modes & TF_MODE_XATTN) strcat(buf, "xattn");
     else if (modes & TF_MODE_CV)    strcat(buf, "cv");
     else if (modes & TF_MODE_DELTA) strcat(buf, "delta");
