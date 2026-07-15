@@ -861,6 +861,65 @@ The gates that would have caught them — a Windows build, and an *executing* CU
 target — now exist; only the second still cannot run in CI, for want of a GPU
 runner.
 
+## 18. Right-sizing the model — capacity is free at 6h, load-bearing at 48h
+
+Roadmap Item 1 (speed). §3/§7 hinted capacity is neutral at 826 storms; if a
+smaller model matched the recipe it would be a free training speedup. Swept the
+recipe (`--motion --physics --cv --huber=0.1`, `--emb=none`) across model sizes,
+five split seeds, held-out test ΔR.
+
+**6h (`--pred_len=1`), 5-seed mean ± σ:**
+
+| config | params | 6h ΔR (km) | Δ vs recipe | speedup |
+|:--|:--:|:--:|:--:|:--:|
+| d64L2 (recipe) | 132 367 | 35.22 ± 2.71 | +0.00 | 1.00× |
+| d64L1 | 98 895 | 34.96 ± 2.34 | −0.26 | 1.49× |
+| d32L2 | 46 735 | 34.74 ± 1.80 | −0.48 | 2.65× |
+| d32L1 | 38 191 | 36.35 ± 5.51 | +1.13 | 5.33× |
+| **d16L2** | **18 511** | **33.99 ± 2.16** | **−1.23** | **8.66×** |
+
+Every size down to `d16L2` — **7× fewer parameters, 8.66× faster** — is within
+one σ of the recipe, and `d16L2` has the *best* mean. On 6h alone the recipe's
+capacity is pure overhead: this looks like a free win.
+
+**It is a trap.** 6h is the one horizon where the model *loses* to CLIPER (§15);
+the recipe exists for long-horizon skill. Re-run the two leading small configs
+against a fresh `d64L2` control at `--pred_len=8` (48h rollout), five seeds:
+
+| config | params | 6–48h mean ΔR ± σ | 48h ΔR ± σ | vs recipe | vs CLIPER (6–48h) |
+|:--|:--:|:--:|:--:|:--:|:--:|
+| d64L2 (recipe) | 132 367 | **227.9 ± 9.6** | 459 ± 21 | — | −7.1 (beats) |
+| d16L2 | 18 511 | 231.5 ± 10.4 | 463 ± 15 | +3.6 | −3.5 (beats) |
+| d32L2 | 46 735 | 234.9 ± 9.8 | 473 ± 22 | +6.9 | −0.1 (**ties**) |
+
+The control reproduces §15 exactly (227.9 mean; seed-1 = 236.87 to the digit),
+validating the comparison. **The 6h ranking inverts.** Over the 48h rollout the
+recipe is best, and the smaller models regress *toward the CLIPER bar* (235.0):
+`d16L2` keeps only half the recipe's margin, and `d32L2` essentially **ties**
+constant-velocity — i.e. gives back the entire reason to use a learned model.
+The 48h point tells the same story (recipe 459, d16 463, d32 473, CLIPER 482.9).
+
+The 48h gaps (+3.6, +6.9 km) sit within one σ (~10): a consistent *trend*, not a
+difference resolved at five seeds (separating 3.6 km from σ = 10 needs ~40 seeds
+— not worth it). But the risk is asymmetric — adopting a smaller *default* trades
+the model's only advantage, long-horizon skill over dead reckoning, for training
+time — so the default does not move on within-noise evidence.
+
+**Verdict.** The default stays `d64L2`. Capacity is neutral at 6h and
+load-bearing at 48h — the §11 lesson (single-horizon results flip under the full
+rollout) once more. `d16L2` is documented as a legitimate *fast / short-horizon*
+config: 8.66× faster, statistically-equal 6h skill, still beats CLIPER over
+6–48h. `d32L2` is dominated (larger than d16, ties CLIPER at 48h) — reject. The
+methodological point: **a right-sizing study must measure the horizon the model
+is *for*, not the cheapest horizon to run.**
+
+*Harness note (cost a first sweep):* give each concurrent run a **unique**
+`--save`. The default checkpoint path is shared; the held-out eval reloads from
+`--save` (`train.c`), so two concurrent runs racing the same file either abort on
+the param-size guard (different geometry → visible NA) or — worse — silently
+score the *wrong split* (same geometry, guard blind), poisoning the mean with a
+plausible outlier. Both failure modes appeared before the fix.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above
