@@ -134,6 +134,15 @@ int main(void) {
     model_set_huber(0.05f); model_set_hweight(1.0f);
     fail |= check_model("huber+hweight", 3);
     model_set_huber(0.0f); model_set_hweight(0.0f);
+    /* --km_loss: the equirectangular km objective scales the longitude residual by
+     * (clon_std/clat_std)·cos(lat); the FD check validates that reweight AND the
+     * extra chain-rule factor kw in its gradient (representative HURDAT-ish stats).
+     * Multistep so per-horizon cos(lat) varies; also composed with Huber. */
+    model_set_km_loss(1, 25.0f, 10.0f, 15.0f);
+    fail |= check_model("km_loss", 3);
+    model_set_km_loss(1, 25.0f, 10.0f, 15.0f); model_set_huber(0.05f);
+    fail |= check_model("km_loss+huber", 3);
+    model_set_km_loss(0, 0.0f, 1.0f, 1.0f); model_set_huber(0.0f);
     /* encoder architecture variants (each set, checked, reset).
      * no-spatial is now the DEFAULT (covered by every check above); this
      * exercises the paper-faithful spatial (self_only) path explicitly. */

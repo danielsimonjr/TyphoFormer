@@ -251,7 +251,7 @@ static int cmd_train(int argc, char **argv) {
     int rotframe = 0;                 /* cv correction in the motion-aligned (along/cross-track) frame */
     int gru = 0;                      /* cv + a recurrent GRU memory over horizons (implies cv) */
     int xattn = 0;                    /* cv + decoder cross-attention over the encoder sequence (implies cv) */
-    int km_loss = 0;                  /* reweight the longitude gradient by cos^2(lat) so loss ≈ km error (serial only) */
+    int km_loss = 0;                  /* equirectangular km objective in model_loss (both paths); see model_set_km_loss */
     /* Encoder structural options (see cmd_eval — each must be re-passed to
      * evaluate a checkpoint trained with it, since they alter the param set).
      * spatial=0 is the DEFAULT (no N=1 spatial blocks — FINDINGS §7); pass
@@ -370,9 +370,7 @@ static int cmd_train(int argc, char **argv) {
     else if (xattn) printf("decoder: constant-velocity + cross-attention over encoder sequence\n");
     else if (cv)    printf("decoder: constant-velocity mode (anchor at CLIPER, learn curvature)\n");
     else if (delta) printf("decoder: delta mode (predict displacement from seed)\n");
-    /* --km_loss reweights gradients inside the serial inner loop, which the
-     * data-parallel workers never execute — warn if the user combined them. */
-    if (km_loss && threads > 1) printf("note: --km_loss applies on the serial path; use --threads=1\n");
+    if (km_loss) printf("loss: equirectangular km objective (lon residual x (cstd_lon/cstd_lat)*cos(lat))\n");
 
     if (threads < 1) threads = 1;                    /* clamp: threads=0 or negative is meaningless */
     /* architecture options — all set BEFORE model_new (they change the param set)
@@ -406,6 +404,11 @@ static int cmd_train(int argc, char **argv) {
     if (co_spatial) modes |= TF_MODE_CO_SPATIAL;
     /* Loss shaping (globals read by every model_loss call, both training paths). */
     model_set_huber(huber); model_set_hweight(hweight);
+    /* --km_loss: equirectangular kilometre objective. Now lives in model_loss (so it
+     * applies on BOTH the serial and data-parallel paths — no longer serial-only) and
+     * reweights loss AND gradient consistently. Fed the TRAIN-set coordinate stats
+     * (leakage-safe): lat mean/std and lon std. Off => bit-identical to MSE. */
+    model_set_km_loss(km_loss, ds.cmean[0], ds.cstd[0], ds.cstd[1]);
     /* Deferred weight-gradient accumulation (--defer_dw): one dW GEMM per layer
      * per BATCH instead of per sample. Bit-identical to the immediate path
      * (pinned by tests/test_parallel's defer check) but measured NEUTRAL on the
@@ -487,8 +490,8 @@ static int cmd_train(int argc, char **argv) {
                 /* Push the current master weights to every replica, then have
                  * the workers forward+backward their shard and reduce gradients
                  * back into the master `pl`. Workers feed the same per-sample
-                 * aux inputs as the serial loop (neighbours, seed velocity);
-                 * only --km_loss remains serial-only. */
+                 * aux inputs as the serial loop (neighbours, seed velocity).
+                 * (--km_loss now lives in model_loss, so workers apply it too.) */
                 partrainer_broadcast(pt, &pl);       /* replicas <- master weights */
                 run_loss += partrainer_step_grads(pt, &pl, &ds, train, b, bs, lambda);
             } else {                                 /* serial */
@@ -503,16 +506,7 @@ static int cmd_train(int argc, char **argv) {
                     model_forward(&m, xn, xt, yp);
                     /* Forward loss and its gradients (dpred, dgate) for one sample. */
                     bl += model_loss(m.pred, Y, m.pgf.gate, lambda, dpred, dgate);
-                    if (km_loss) {                       /* equirectangular: down-weight lon by cos^2(lat) */
-                        /* Denormalize the seed latitude to degrees, then scale the
-                         * longitude gradient by cos²(lat). On an equirectangular
-                         * grid one degree of longitude spans cos(lat)·111 km, so
-                         * this makes the optimized loss track kilometre error more
-                         * faithfully at high latitudes. Latitude grad is untouched. */
-                        float latd = yp.data[0] * ds.cstd[0] + ds.cmean[0];
-                        float w = cosf(latd * (float)(PI_ / 180.0)); w *= w;
-                        for (int h = 0; h < c.pred_len; ++h) dpred.data[h * 2 + 1] *= w;
-                    }
+                    /* (--km_loss now applies inside model_loss on both paths.) */
                     /* Scale each sample's gradient by 1/bs BEFORE accumulating so
                      * the summed grad over the batch equals the MEAN gradient —
                      * matching the 1/bs averaging the parallel path does. */

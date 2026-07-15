@@ -1025,6 +1025,49 @@ on the metric that matters, at **zero inference cost and no new parameters**. Ke
 (no early stop, full epoch budget). The roadmap's first accuracy win — cheap, low-risk,
 and it targets exactly the flat-landscape / chaotic-training weakness §15 documented.
 
+## 21. The km-aligned loss — a proper implementation, and a definitive neutral
+
+Roadmap Item 4. The model trains on **normalized-coordinate MSE** but is scored on
+**great-circle kilometres (ΔR)** — a genuine objective/metric mismatch: a normalized
+unit of longitude is a different number of kilometres than one of latitude (different
+train-set std), and longitude kilometres shrink by cos(lat) toward the poles. The old
+`--km_loss` gestured at this but was a **serial-only** gradient hack that scaled only
+the longitude *gradient* by cos²(lat) — leaving the reported loss as plain MSE (an
+*inconsistent* optimization: the gradient was not the gradient of any loss) and
+ignoring the std anisotropy entirely.
+
+Reworked into a **proper equirectangular km objective** inside `model_loss`: the
+longitude residual is scaled by `(cstd_lon/cstd_lat)·cos(lat)` (latitude the reference),
+so the loss becomes — up to a global constant — the squared kilometre error, with the
+**gradient reweighted consistently** (chain-rule factor included, finite-difference
+gradient-checked: new `km_loss` and `km_loss+huber` cases in `test_model`). Because it
+lives in `model_loss` it now applies on **both** the serial and the data-parallel paths
+(no more serial-only). Off by default it is bit-identical to MSE (`test_golden`
+unchanged). The equirectangular (small-angle) form is deliberate — the exact haversine
+gradient carries a `1/sin(d)` factor that blows up as pred→true, i.e. exactly at
+convergence.
+
+Recipe (`d64L2`), 5 seeds, paired baseline vs `--km_loss`:
+
+| horizon | baseline | km_loss | paired Δ | km_loss wins |
+|:--|:--:|:--:|:--:|:--:|
+| 6h (`--pred_len=1`) | 35.22 ± 2.71 | 35.68 ± 3.86 | −0.46 | 2/5 |
+| 6–48h mean (`--pred_len=8`) | 227.9 ± 9.6 | 226.3 ± 8.5 | +1.59 | 3/5 |
+
+**Neutral at both horizons.** The 48h Δ of +1.6 km sits on a per-seed spread of −12 to
++17 (Δ std ≈ 11, SEM ≈ 5 → 0.3σ) — indistinguishable from zero. Aligning the objective
+with the metric does **not** move held-out ΔR here. The likely reason: the model already
+anchors at constant-velocity (`--cv`) and the per-step displacements are short-range,
+where after per-dataset normalization the km metric and the MSE optimum nearly coincide;
+the lat/lon anisotropy reweight is a second-order adjustment the model's capacity absorbs.
+
+**Kept, not reverted** — unlike the register-blocked kernel (§19), this is not new
+complexity for no gain but the *repair* of an existing broken flag: the reworked
+`--km_loss` is consistent, gradient-checked, and path-agnostic where the old one was an
+inconsistent serial-only hack. It stays **off by default** and is documented as
+measured-neutral. The finding is the measurement; the deliverable is a correct kernel
+that no longer misleads whoever reaches for it next.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above

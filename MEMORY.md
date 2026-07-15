@@ -33,8 +33,11 @@ cost hours, and it isn't already stated somewhere better.
   easy→hard. **Items 1–3 done:** (1) right-size — default unchanged (capacity invariant
   below); (2) register-blocked GEMM — refuted (below); (3) **SWA (`--swa`) — SHIPPED, the
   first accuracy win**: neutral at 6h, **−6 km at 48h (4/5 seeds)**, doubling the recipe's
-  margin over CLIPER; opt-in, bit-neutral when off (FINDINGS §20). Next: great-circle km
-  loss (Item 4), then multi-horizon head, uncertainty, and data/physics levers.
+  margin over CLIPER; opt-in, bit-neutral when off (FINDINGS §20). (4) km-aligned loss —
+  reworked `--km_loss` into a proper both-paths gradient-checked equirectangular objective,
+  but **measured NEUTRAL** (§21): the `--cv` anchor + short-range steps put km and MSE
+  optima nearly together. Kept (off) as a correct flag. Next: multi-horizon head (Item 5),
+  uncertainty, and data/physics levers.
 
 ---
 
