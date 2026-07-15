@@ -37,11 +37,15 @@ Grounded in FINDINGS: the model's own measurements say **architecture is neutral
 *training statistics*, not the Transformer. Each item: investigate → measure →
 implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives are wins.
 
-- [ ] **1. Right-size sweep (speed · EASY · possibly free).** §3/§7 found capacity
-      neutral. If `d_model=64` is over-parameterized for 826 storms, a smaller model
-      (`--d_model=32`/`--n_layers=1`) may match accuracy at 2–4× the speed. Flags
-      already exist — pure measurement: recipe at a few sizes × 5 seeds, compare
-      held-out ΔR. Adopt the smallest size within noise of the recipe.
+- [x] **1. Right-size sweep (speed · EASY · possibly free).** ~~Adopt the smallest
+      size within noise of the recipe.~~ **Done — default UNCHANGED (FINDINGS §18).**
+      Measured 5 sizes × 5 seeds. At **6h** every size down to `d16L2` (7× fewer
+      params, 8.66× faster) is within noise and d16L2 has the best mean — looked
+      free. But the confirmation at **pred_len=8 (48h rollout)** inverts it: the
+      recipe's capacity is load-bearing at long horizons, and smaller models regress
+      toward the CLIPER bar (d16L2 keeps half the margin; d32L2 ties CLIPER). Verdict:
+      keep `d64L2` default; `d16L2` documented as a fast/short-horizon option. The 6h
+      sweep alone would have silently killed the model's only advantage.
 - [ ] **2. Register-blocked GEMM microkernel (speed · MEDIUM · ~1.2–1.4×).** The one
       *real* GEMM lever (sample-batching was refuted above). GEMMs are 52–62% of
       fwd+bwd and run ~22 GFLOP/s vs ~50–100 peak. Tile the `m` loop so a block of

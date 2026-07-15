@@ -29,9 +29,10 @@ cost hours, and it isn't already stated somewhere better.
   not renormalize their line endings.
 - **Three numerically-verified backends:** native CPU (gcc), CUDA, OpenCL. All
   agree op-for-op to 1e-07. None is faster than the CPU for this model — see below.
-- **Open work is small:** one research question (text on harder data, needs
-  embeddings for the new records) and one uncertain micro-optimization (a
-  register-blocked GEMM kernel). Everything else on `TODO.md` is done or measured-out.
+- **Open work is the roadmap (`TODO.md`, 2026-07-15):** 8 speed/accuracy items worked
+  easy→hard. Item 1 (right-size) is **done — default unchanged** (see the capacity
+  invariant below). Next up is the register-blocked GEMM microkernel (Item 2), then
+  training-statistics and data/physics levers. Everything pre-roadmap is measured-out.
 
 ---
 
@@ -55,6 +56,15 @@ cost hours, and it isn't already stated somewhere better.
 - **Report five-seed means, never single-seed numbers.** The optimization is chaotic:
   a float-rounding-level perturbation moves single-seed results ~3% and flips the
   early-stopping epoch. This is why every `FINDINGS.md` table is a multi-seed mean.
+- **Do NOT shrink the default (`d64L2`) on a 6h result.** Capacity is neutral at 6h —
+  `d16L2` (7× fewer params, 8.66× faster) matches the recipe there and looks like a
+  free win — but **load-bearing at 48h**: over the full rollout the smaller models
+  regress toward the constant-velocity bar and give back the model's only advantage
+  (`d32L2` *ties* CLIPER). A right-sizing study must measure the horizon the model is
+  *for*. `d16L2` is a documented fast/short-horizon option, not a replacement.
+  (`FINDINGS.md` §18.) *Sweep harness trap:* concurrent runs need a **unique `--save`**
+  — the default checkpoint is shared and the held-out eval reloads it, so a race
+  either aborts (different geometry) or silently scores the wrong split (same geometry).
 
 ---
 
