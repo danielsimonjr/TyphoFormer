@@ -30,9 +30,11 @@ cost hours, and it isn't already stated somewhere better.
 - **Three numerically-verified backends:** native CPU (gcc), CUDA, OpenCL. All
   agree op-for-op to 1e-07. None is faster than the CPU for this model — see below.
 - **Open work is the roadmap (`TODO.md`, 2026-07-15):** 8 speed/accuracy items worked
-  easy→hard. Item 1 (right-size) is **done — default unchanged** (see the capacity
-  invariant below). Next up is the register-blocked GEMM microkernel (Item 2), then
-  training-statistics and data/physics levers. Everything pre-roadmap is measured-out.
+  easy→hard. **Items 1–3 done:** (1) right-size — default unchanged (capacity invariant
+  below); (2) register-blocked GEMM — refuted (below); (3) **SWA (`--swa`) — SHIPPED, the
+  first accuracy win**: neutral at 6h, **−6 km at 48h (4/5 seeds)**, doubling the recipe's
+  margin over CLIPER; opt-in, bit-neutral when off (FINDINGS §20). Next: great-circle km
+  loss (Item 4), then multi-horizon head, uncertainty, and data/physics levers.
 
 ---
 
