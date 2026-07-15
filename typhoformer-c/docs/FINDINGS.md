@@ -770,11 +770,37 @@ takes **2150 s (36 min)** — against ~1 s on the CPU. An earlier version that d
 *each*; it was still grinding after 30 minutes), fixed with a three-slot
 device-buffer pool — but pooling only removed the allocator, not the transfers.
 
-A real GPU speedup requires **device-resident** `Mat.data`, which means first
-routing those ~189 direct `.data[]` accesses through the `tensor.h` seam. Until
-then the seam is *proven* (the same model math runs unmodified on CPU, OpenCL and
-CUDA and agrees to 1e-07) but not *exploited*. This mirrors §7's lesson from the
-other direction: knowing where the time goes matters more than adding hardware.
+**Why device-resident data does not rescue it — the seam is too narrow.** The
+tempting fix is to keep `Mat.data` on the GPU across ops. It does not help, and
+tracing *why* is the real lesson. The `tensor.h` seam the backend accelerates is
+only ~13 ops (the GEMMs, `relu`, `sigmoid`, …). But most of the model's arithmetic
+runs **outside** it, in plain host C: `layernorm_forward` computes mean/variance
+straight off `x.data[]`; softmax, the GRU gates, PGF gating and the entire decoder
+rollout do the same. Those are the ~189 direct `.data[]` accesses — not glue, the
+core layer math. And they are **interleaved** with the seam ops: a matmul (GPU)
+feeds a layernorm (host) feeds the next matmul (GPU) feeds a softmax (host). So the
+data *structurally* has to live on the host; making it device-resident would force
+a sync-down after every single seam op anyway. The per-op transfers are not
+redundant — the narrow seam requires them.
+
+The arithmetic makes it concrete. The largest GEMM (`[12,64]@[64,128]`) is ~196K
+FLOPs ≈ **100 ns** of compute on the P1000. Each op pays a host↔device round trip +
+launch + `cudaDeviceSynchronize` ≈ **20–50 µs** (higher under WSL2's paravirtualised
+GPU). That is a **200–500× overhead-to-compute ratio** — the GPU does 100 ns of work
+then waits tens of microseconds, which is exactly why it idles at ~7%.
+
+So beating the CPU is not an optimization of this backend; it is a different
+backend. It requires porting the layer math itself — layernorm, attention
+(softmax + scaling), GRU, PGF, the decoder rollout — into GPU kernels so the whole
+forward+backward stays on the device, and *then* batching samples into the encoder
+GEMMs so each launch does enough work to amortise its overhead. On a Pascal P1000
+at `d_model=64` even that wins only modestly; the payoff scales with model size
+(`--full`, d_model=256) and batch. Given training is already ~14 min on the CPU and
+the real bottlenecks (data, motion-blind inputs) are solved, that port was judged
+not worth its cost. The seam is *proven* — the same model math runs unmodified on
+CPU, OpenCL and CUDA and agrees to 1e-07 — but deliberately not *exploited*. This
+mirrors §7 from the other side: knowing where the time goes matters more than adding
+hardware, and here the time is in the transfers a narrow seam forces, not the maths.
 
 **Methodological note.** "It compiles" is not "it runs", and one platform is not
 all platforms. Both bugs sat behind green CI for the entire life of the project.
