@@ -18,11 +18,14 @@ cost hours, and it isn't already stated somewhere better.
 
 ## Where things stand (2026-07-15)
 
-- **The model works, and the science is settled.** On the full 826-storm dataset
-  the recipe (`--motion --physics --cv --huber=0.1`) beats split-matched
-  constant-velocity over the 48h rollout on all five splits (crossover ~24h,
-  −8.4% at 48h); dead reckoning still wins the first few hours. The language
-  branch does **not** help. Details: `FINDINGS.md` §15–16.
+- **The model works.** On the full 826-storm dataset the recipe
+  **`--motion --physics --direct --huber=0.1`** (the direct multi-horizon head is
+  now the default decoder — §22) beats split-matched constant-velocity **at every
+  horizon** on all five splits: 32.1 km @ 6h (level with CLIPER) to −17.2 km over the
+  6–48h rollout, and ~1.2× faster to train. It replaced the autoregressive `--cv` head
+  (which loses at 6h and compounds rollout error; every result in §1–§21 used `--cv`).
+  The language branch does **not** help. Details: `FINDINGS.md` §22 (and §15–16 for
+  the `--cv`-era numbers).
 - **The real dataset is committed.** `HURDAT_full.csv` (24,177 records, 826 storms,
   2004–2025, three basins) plus the raw NOAA `.txt` sources, pinned **binary**
   (`.gitattributes`) so a NOAA re-release can't silently change them. `git` must

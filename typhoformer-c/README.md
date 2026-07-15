@@ -122,16 +122,18 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--seed=` | RNG seed (determinism). | 20260711 |
 | `--csv= --emb= --bin= --save=` | Data source / checkpoint path. `--emb=none` = **text-free mode**: the language branch is fed zeros (== `--no_text`), so CSVs converted from raw HURDAT2 train without any embeddings. | repo defaults |
 
-**For accuracy, train with `--motion --physics --cv --huber=0.1`** (the
+**For accuracy, train with `--motion --physics --direct --huber=0.1`** (the
 best-known recipe): motion features give the model the trajectory signal, the
-physics features add the curvature signal, the constant-velocity anchor lets
-it start at CLIPER and learn only the correction, and the Huber loss tames
-outlier storms. On the full 826-storm dataset
-(`--csv=../HURDAT_full.csv --emb=none`) it **beats split-matched
-constant-velocity over the 48-hour rollout on all five splits** — crossover at
-24h, **−8.4% at 48h** — while one-step (6h) dead reckoning remains ahead; on
-the bundled 98-storm sample it scores 38.5 km @ 6h, under that sample's
-39.4 km CLIPER bar (see [docs/FINDINGS.md](docs/FINDINGS.md) §14–§15).
+physics features add the curvature signal, the **direct multi-horizon head**
+predicts all horizons at once (anchored at seed constant-velocity, no
+autoregressive rollout — so no error compounding), and the Huber loss tames
+outlier storms. On the full 826-storm dataset (`--csv=../HURDAT_full.csv
+--emb=none`) it **beats split-matched constant-velocity at every horizon** —
+32.1 km @ 6h (level with CLIPER) and −17.2 km over the 6–48h rollout (5/5
+splits) — and trains **~1.2× faster** than the older `--cv` rollout head
+(FINDINGS §22). The autoregressive `--cv` head (which loses at 6h and compounds
+error over the rollout) remains available and is the head every result before
+§22 was measured on; `--swa` (§20) helps `--cv` but is subsumed by `--direct`.
 All decoder variants work on both the serial and the data-parallel
 (`--threads=N`) paths. `eval`/`predict` auto-detect `--motion`/`--physics` from
 the checkpoint's feature count; pass `--delta`/`--cv` to `eval` to match the

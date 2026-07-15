@@ -1112,10 +1112,24 @@ any horizon.
 
 Shipped as `--direct` (gradient-checked — `direct` and `direct+multistep` FD-pass; golden
 unchanged when off; checkpoint records `TF_MODE_DIRECT` and eval self-configures; runs on
-serial and `--threads=N` alike). **This is a strong candidate to replace `--cv` as the
-recommended decoder** — a headline-recipe change is left as a deliberate call rather than
-folded in silently, but the evidence is one-directional. Next open question: whether it
-stacks with SWA (§20), the other long-horizon win.
+serial and `--threads=N` alike). **It is now the recommended decoder** — the recipe becomes
+`--motion --physics --direct --huber=0.1`. The evidence was one-directional and the change
+was made deliberately (2026-07-15); every result in §1–§21 was measured on the older
+autoregressive `--cv` head, which is kept for reference and reproducibility.
+
+**It is also faster.** At `--pred_len=8` the `--cv` head rolls out eight sequential steps;
+`--direct` is one matmul. Measured (d64L2, min of 3, core-pinned): **~17 s/epoch (`--cv`)
+→ ~14 s/epoch (`--direct`), a 1.20× speedup** — so the single change improves *both* speed
+and accuracy. (At `--pred_len=1` the rollout is one step, so the two are speed-equal.)
+
+**It does not stack with SWA — because it subsumes it.** SWA (§20) helped `--cv` (227.9 →
+221.0) by averaging away the chaotic-training noise in a noisy best-val checkpoint. The
+direct head already reaches a low-variance optimum by construction (no rollout compounding),
+so averaging its tail pulls it *off* its near-optimal checkpoint: `--direct` 217.8 vs
+`--direct --swa` 222.1 (SWA better on 1/5 seeds, though it does tighten the spread, σ 8.7 →
+3.4). SWA and the direct head are two routes to the same end; the direct head is the better
+one, and it beats every combination (`--cv` 227.9, `--cv --swa` 221.0, `--direct --swa`
+222.1, **`--direct` 217.8**). The recommended recipe is `--direct` *without* `--swa`.
 
 ## Reproduce
 
