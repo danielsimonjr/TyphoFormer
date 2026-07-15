@@ -29,6 +29,56 @@ Open work, sourced from the docs (chiefly `typhoformer-c/docs/FINDINGS.md`) and 
 - [x] **Motion-aligned frame for the cv correction.** Done (`--rotframe`, exact backward through ∂u/∂v, gradient-checked serial+parallel) — and honestly negative: worse on 4/5 splits at 6h, neutral at 48h (FINDINGS §13). Off by default.
 - [x] **Text-free data path to scale storms.** Done — `tools/hurdat2_to_csv.py` converts raw NOAA HURDAT2 to the repo's CSV schema, and `--emb=none` trains without embedding chunks (language branch fed zeros == `--no_text`). The actual 20-year retrain still needs the HURDAT2 download (tracked in the research item above; NOAA is unreachable from this environment's network policy).
 
+## Improvement roadmap (2026-07-15 — worked one at a time, easy → hard)
+
+Grounded in FINDINGS: the model's own measurements say **architecture is neutral**
+(§3, §7, §8) and the levers that moved it were **data** (98→826 storms) and
+**physics in the inputs** (`--motion`). So this roadmap attacks *information* and
+*training statistics*, not the Transformer. Each item: investigate → measure →
+implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives are wins.
+
+- [ ] **1. Right-size sweep (speed · EASY · possibly free).** §3/§7 found capacity
+      neutral. If `d_model=64` is over-parameterized for 826 storms, a smaller model
+      (`--d_model=32`/`--n_layers=1`) may match accuracy at 2–4× the speed. Flags
+      already exist — pure measurement: recipe at a few sizes × 5 seeds, compare
+      held-out ΔR. Adopt the smallest size within noise of the recipe.
+- [ ] **2. Register-blocked GEMM microkernel (speed · MEDIUM · ~1.2–1.4×).** The one
+      *real* GEMM lever (sample-batching was refuted above). GEMMs are 52–62% of
+      fwd+bwd and run ~22 GFLOP/s vs ~50–100 peak. Tile the `m` loop so a block of
+      output rows reuses each `B[p][:]` from registers. Must stay bit-close (golden)
+      or re-pin; dependency-free (no BLAS).
+- [ ] **3. Stochastic Weight Averaging (accuracy · MEDIUM-EASY · cheap, low-risk).**
+      Directly targets the flat-val-landscape + chaotic-training finding (§17): average
+      weights across the late-training plateau instead of early-stopping one epoch.
+      Should beat any single checkpoint and cut seed variance. Contained; test on the
+      five-seed harness.
+- [ ] **4. Great-circle (km) loss (accuracy · MEDIUM).** `--km_loss` exists but is
+      serial-only and *equirectangular* (cos²(lat) lon reweight), not true haversine.
+      Make it work under `--threads=N`, optionally upgrade to exact great-circle, and
+      test five-seed vs MSE. Aligns the objective with the ΔR metric it's scored on.
+- [ ] **5. Direct multi-horizon head (speed + accuracy · MEDIUM-HARD).** The decoder
+      rolls out 48h in 8 sequential steps, compounding error. Predict all 8 horizons in
+      one shot from the encoder context (no rollout) — fewer ops *and* no error
+      accumulation. New head + hand-written backward, gradient-checked; compare per-horizon.
+- [ ] **6. Probabilistic / NLL uncertainty head (accuracy · HARD).** TC forecasting is
+      the cone, not a point. Heteroscedastic/NLL head outputs calibrated uncertainty;
+      NLL often sharpens the point forecast too. Extends the §13 seed-ensemble work.
+- [ ] **7. Global basins via IBTrACS, esp. West Pacific (accuracy · HARD · data).** §3
+      proved data is the ceiling; IBTrACS is 3–5× HURDAT2, and WPac is the *actual*
+      typhoon basin (this is a typhoon model on Atlantic data). New converter analogous
+      to `hurdat2_to_csv.py`. Biggest data lever.
+- [ ] **8. Environmental steering predictors from ERA5 (accuracy · HARDEST · data + physics).**
+      The physical gap: track is governed by steering flow the model can't see. Add coarse
+      500 hPa geopotential/deep-layer wind, SST, shear at the storm location (SHIPS/CLIPER
+      tradition). Data engineering (ERA5 fetch + interpolation). **Highest-leverage accuracy
+      move on the board** — deliberately last because it is the most infrastructure.
+
+> **Deliberately NOT on the list:** more work on the language branch. The GPT-4o text is
+> generated *from* the track numbers, so it is largely redundant — which is why `--no_text`
+> keeps winning (§6, §16). It would only help carrying *independent* signal (forecaster
+> discussion, environmental analysis), which the current descriptions don't. One clean
+> re-test on harder cases is the research item above; beyond that, not worth the effort.
+
 ## Engineering
 
 - [x] **Multicore support for the serial-only paths.** Done — the data-parallel workers now feed the per-sample aux inputs (seed velocity, co-active neighbours), so `--cv`/`--gru`/`--xattn`/`--co_spatial` all train with `--threads=N`; `test_parallel` pins serial/parallel gradient equivalence for each variant on the real dataset. Only `--km_loss` remains serial-only.
