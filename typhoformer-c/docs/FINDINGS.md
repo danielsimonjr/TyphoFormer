@@ -850,10 +850,10 @@ is 1.75× *slower* batched, from the larger operands blowing the L1 working set)
 even `--full`-scale weights (256×1024, 1 MB, spilling L2→L3) → **≤1.03×**. Sample
 batching cannot claim any of the 52%. The only real GEMM lever is a register-blocked
 microkernel — tile the `m` loop so a block of output rows reuses each `B[p][:]` from
-registers — a different, localized change with an uncertain payoff, and not attempted:
-CPU training is already ~14 min. Recording this (with the numbers) so the invasive
-batch-the-encoder refactor is never re-proposed on the false premise; measuring the
-premise cost minutes and saved days.
+registers. That was the "uncertain payoff" left open here; **§19 attempted it and
+measured it — refuted for the recipe.** Recording the batching result (with the
+numbers) so the invasive batch-the-encoder refactor is never re-proposed on the false
+premise; measuring the premise cost minutes and saved days.
 
 **Methodological note.** "It compiles" is not "it runs", and one platform is not
 all platforms. Both bugs sat behind green CI for the entire life of the project.
@@ -919,6 +919,71 @@ is *for*, not the cheapest horizon to run.**
 the param-size guard (different geometry → visible NA) or — worse — silently
 score the *wrong split* (same geometry, guard blind), poisoning the mean with a
 plausible outlier. Both failure modes appeared before the fix.
+
+## 19. The register-blocked GEMM microkernel — a clean isolated win that the model refutes
+
+Roadmap Item 2, and the "only real GEMM lever" §17 left open. `mat_matmul` is
+`ikj`-order: for a fixed reduction index `p` it re-reads the whole `B[p][:]` row
+once per output row, so `B` is streamed `m` times with **zero reuse** — memory-
+bandwidth bound. The textbook fix is an MR×NR register-blocked microkernel: process
+MR output rows together so each `B[p][j]` is loaded once and fanned into MR
+accumulators held in registers across the whole `p`-loop.
+
+**In isolation it works, and it is bit-exact.** A standalone microbenchmark of the
+kernel on the model's actual GEMM shapes (i7-8850H):
+
+| MR | portable `-O3` geomean | `-march=native` geomean |
+|:--:|:--:|:--:|
+| 2 | 1.40× | 1.20× |
+| **4** | **1.55×** | **1.75×** |
+| 6 | 0.52× | 0.35× |
+| 8 | 0.56× | 0.36× |
+
+`maxdiff = 0` at every shape and every MR: for a fixed `(i,j)` the reduction over
+`p` runs in the same order, so blocking is **bit-identical** — `test_golden` stays
+pinned, no re-pin. MR=4 is the knee; MR≥6 spills the 16-register file (C-tile +
+broadcast exceed the SSE/AVX register bank) and regresses below 1×.
+
+**In the model it regresses the recipe.** Dropped MR=4 into `mat_matmul`, all tests
+green (golden unchanged, as predicted). End-to-end `bench`, portable build,
+interleaved and core-pinned, min of 10 (naive A/B was too noisy to trust — the first
+runs disagreed with themselves by 2× until the measurement was pinned and
+interleaved):
+
+| config | forward+backward | speedup |
+|:--|:--:|:--:|
+| `--full` (d=256, 3 layers) | 24.7 → 21.6 ms | **1.15×** |
+| recipe (d=64) | 1.13 → 1.31 ms | **0.86× (16% slower)** |
+
+Forward is unchanged (it uses the already-tuned `mat_matmul_bt`), so the regression
+is entirely in the backward's input-gradient GEMM — the `ikj` kernel that was
+changed. Instrumenting it directly: **in-situ `mat_matmul` is 6.5% slower** (233 vs
+219 ms over an identical 10,505 calls), the exact opposite of the isolated 1.55×.
+A shape histogram kills the obvious hypothesis (tiny `m=1` decoder-rollout GEMMs)
+— those are only **1.2%** of the work; **98.8% is `m=12` shapes**, precisely the
+ones the microbench said get 1.25–1.6× *faster*. The isolated benchmark keeps one
+shape's data hot in L1, the i-cache warm, and the branch predictor trained; in-situ
+the larger blocked function is called with seven shapes interleaved among
+layernorm/attention/GRU code, cold every time. The bigger body costs more than the
+reuse saves — but only below a scale the recipe never reaches.
+
+**A size guard recovers parity but is not worth it.** Gating the blocked path on
+`k·n ≥ 32768` sends the recipe's small GEMMs back to the plain kernel (recipe → 0.97×,
+i.e. parity) while `--full` keeps 1.15×. But that threshold is **machine-specific** —
+it is where *this* CPU's cache flips the tradeoff; another L1/i-cache size moves it —
+and a cache-tuned magic constant does not belong in a portable, dependency-free
+kernel that also has to match the CUDA and OpenCL backends op-for-op. And the only
+config it helps, `--full`, is the one §14–15 measured as capacity-**overkill**; the
+recommended recipe gains nothing.
+
+**Verdict: refuted, reverted.** Register-blocking is a real win on large GEMMs and a
+net loss on the recipe; the isolated microbenchmark (1.55×) does not survive contact
+with the interleaved model (0.86×). Recorded so the next person does not re-derive it
+from the microbench and ship a recipe regression. If future data-scaling (Items 7–8)
+ever motivates training `--full`-scale models for real, revisit — behind a guard, and
+re-measure the crossover on the target machine. Same lesson as §17's two bugs and the
+GEMM-batching refutation: **measure the real artifact end-to-end, not the premise in
+isolation.**
 
 ## Reproduce
 

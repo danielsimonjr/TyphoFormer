@@ -89,8 +89,15 @@ decoder rollout — runs in **plain host C reading `Mat.data[]` directly** (~189
 - **Sample-batching the GEMMs does NOT help either — measured.** `mat_matmul` is
   `ikj`-order and reads each weight row once *per output row*, so stacking B samples
   into one `[B·T, d]` GEMM has identical weight traffic (0.57–1.04× at recipe scale,
-  ≤1.03× at `--full`). The `TODO.md` "biggest speed lever" was a false premise. The
-  only real GEMM lever is a register-blocked microkernel. (`FINDINGS.md` §17.)
+  ≤1.03× at `--full`). The `TODO.md` "biggest speed lever" was a false premise. (§17.)
+- **The register-blocked microkernel is ALSO refuted for the recipe — measured (§19).**
+  MR=4 blocking of `mat_matmul` is bit-exact (golden unchanged) and 1.55× in an
+  *isolated* microbench, but **in-situ it regresses the recipe 16%** (the bigger blocked
+  body costs i-cache/cold-data that the tight loop hides; `mat_matmul` itself 6.5%
+  slower in place). It helps only `--full` (capacity-overkill config, 1.15×); a size
+  guard needs a machine-specific `k·n` threshold that doesn't belong in a portable
+  kernel. **Do not re-derive it from the microbench and ship it — the isolated number
+  lies.** Both "obvious" GEMM speed levers are now measured dead ends for the recipe.
 - **A checkpoint records its decoder mode (TFW4).** The parameter-size guard catches
   `--gru`/`--xattn`/`--posenc` (they change tensor shapes) but is **blind** to
   `--cv`/`--delta`/`--rotframe` (parameter-neutral, they only change what the output

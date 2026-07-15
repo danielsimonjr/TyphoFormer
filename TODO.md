@@ -46,11 +46,14 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       toward the CLIPER bar (d16L2 keeps half the margin; d32L2 ties CLIPER). Verdict:
       keep `d64L2` default; `d16L2` documented as a fast/short-horizon option. The 6h
       sweep alone would have silently killed the model's only advantage.
-- [ ] **2. Register-blocked GEMM microkernel (speed · MEDIUM · ~1.2–1.4×).** The one
-      *real* GEMM lever (sample-batching was refuted above). GEMMs are 52–62% of
-      fwd+bwd and run ~22 GFLOP/s vs ~50–100 peak. Tile the `m` loop so a block of
-      output rows reuses each `B[p][:]` from registers. Must stay bit-close (golden)
-      or re-pin; dependency-free (no BLAS).
+- [x] **2. Register-blocked GEMM microkernel (speed · MEDIUM).** **Done — REFUTED,
+      reverted (FINDINGS §19).** MR=4 blocking of `mat_matmul` is bit-exact (golden
+      unchanged) and a clean **1.55× in an isolated microbench** — but in-situ it
+      **regresses the recipe 16%** (mat_matmul itself 6.5% slower in place: the bigger
+      blocked body costs i-cache/cold-data that the tight-loop microbench hides). It
+      helps only `--full` (1.15×), the capacity-overkill config. A size guard recovers
+      recipe parity but needs a machine-specific `k·n` threshold that doesn't belong in
+      a portable kernel. Isolated ≠ in-situ; measured, not shipped.
 - [ ] **3. Stochastic Weight Averaging (accuracy · MEDIUM-EASY · cheap, low-risk).**
       Directly targets the flat-val-landscape + chaotic-training finding (§17): average
       weights across the late-training plateau instead of early-stopping one epoch.
