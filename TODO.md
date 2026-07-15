@@ -54,11 +54,13 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       helps only `--full` (1.15×), the capacity-overkill config. A size guard recovers
       recipe parity but needs a machine-specific `k·n` threshold that doesn't belong in
       a portable kernel. Isolated ≠ in-situ; measured, not shipped.
-- [ ] **3. Stochastic Weight Averaging (accuracy · MEDIUM-EASY · cheap, low-risk).**
-      Directly targets the flat-val-landscape + chaotic-training finding (§17): average
-      weights across the late-training plateau instead of early-stopping one epoch.
-      Should beat any single checkpoint and cut seed variance. Contained; test on the
-      five-seed harness.
+- [x] **3. Stochastic Weight Averaging (accuracy · MEDIUM-EASY).** **Done — SHIPPED as
+      `--swa`, the roadmap's first accuracy win (FINDINGS §20).** Averages the late-epoch
+      tail instead of one best-val checkpoint. Measured 5 seeds: **neutral at 6h (+1.2 km,
+      2/5) but −6.0 km at 48h (4/5 seeds)** — the chaotic-training noise it smooths
+      compounds over the rollout, so it pays off at long range. Extends the recipe's margin
+      over CLIPER from 7.1 to 14.0 km at 6–48h. Opt-in (neutral at 6h, changes training
+      behavior); bit-neutral when off. Honest SEM caveat ~1.6σ.
 - [ ] **4. Great-circle (km) loss (accuracy · MEDIUM).** `--km_loss` exists but is
       serial-only and *equirectangular* (cos²(lat) lon reweight), not true haversine.
       Make it work under `--threads=N`, optionally upgrade to exact great-circle, and

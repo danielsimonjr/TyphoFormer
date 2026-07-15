@@ -985,6 +985,46 @@ re-measure the crossover on the target machine. Same lesson as §17's two bugs a
 GEMM-batching refutation: **measure the real artifact end-to-end, not the premise in
 isolation.**
 
+## 20. Stochastic Weight Averaging — the first accuracy win, and it lives at long range
+
+Roadmap Item 3. Model selection keeps the single best-val-epoch checkpoint — but
+the val landscape is flat (§15: 30.95–32.06 km across fifteen configs) and training
+is chaotic (a per-op rounding difference moves single-seed results ~3% and flips the
+early-stop epoch). That is precisely the regime where **SWA** — averaging the weights
+over the late-epoch tail instead of picking one epoch — finds a wider, better-
+generalizing point. Two properties make it free here: LayerNorm (not BatchNorm)
+computes its stats per-forward, so averaged weights need no stat recompute; and the
+recipe's **constant LR** (`lr_decay=1.0`) keeps the tail snapshots diverse — the
+SWA-friendly regime.
+
+`--swa` averages every epoch from the window start (default: the second half) onward,
+disables early stopping so the window is well-defined, and scores the held-out test
+with **both** the best checkpoint and the SWA average — a clean per-run A/B (identical
+training, two weight sets), saving the average as `<save>.swa`.
+
+Recipe (`d64L2`), 5 seeds, paired within each run:
+
+| horizon | best-checkpoint | SWA | paired Δ (best−swa) | SWA wins |
+|:--|:--:|:--:|:--:|:--:|
+| 6h (`--pred_len=1`) | 34.98 ± 2.83 | 33.80 ± 2.81 | +1.18 | 2/5 |
+| 6–48h mean (`--pred_len=8`) | 227.0 ± 8.3 | **221.0 ± 10.8** | **+6.02** | **4/5** |
+
+At 6h SWA is neutral — a small mean gain buried in the seed noise (per-seed Δ −0.13 /
+−4.65 / +7.98 / −0.25 / +2.94). At 48h it is a real improvement: the 6–48h mean drops
+227.0 → 221.0, winning 4/5 seeds. **The pattern is the point** — the chaotic-training
+noise SWA smooths *compounds* over the 48h autoregressive rollout, so there is more for
+averaging to fix at long range than at one step. In context: the recipe beats
+split-matched CLIPER (235.0) by 7.1 km over 6–48h (§18); SWA extends that to **14.0 km**
+(221.0 vs 235.0) — **nearly doubling the model's margin over constant-velocity** at the
+horizon it exists for.
+
+Honest caveat: the per-seed Δ is noisy (48h: −8.2 to +16.1, mean +6.0, SEM ~3.6 → ~1.6σ
+from zero) — suggestive, not large-N-certain. But it is 4/5 seeds and a 2.7% central gain
+on the metric that matters, at **zero inference cost and no new parameters**. Kept
+**opt-in** (`--swa`), not forced default: neutral at 6h, and it changes training behavior
+(no early stop, full epoch budget). The roadmap's first accuracy win — cheap, low-risk,
+and it targets exactly the flat-landscape / chaotic-training weakness §15 documented.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above

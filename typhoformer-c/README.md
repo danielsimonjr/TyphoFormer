@@ -95,6 +95,7 @@ The `./typhoformer` binary provides subcommands (the default is `train`, so
 | `--warmup=` | Linear LR warmup steps (0 = off). | 0 |
 | `--lr_decay=` | Per-epoch LR multiplier (1.0 = off). | 1.0 |
 | `--patience=` | Early stop after N epochs without val improvement (0 = off). | 0 |
+| `--swa` / `--swa_start=E` | **Stochastic Weight Averaging**: average the weights over the late-epoch tail (default: second half; `E` sets the first epoch) instead of keeping the single best-val checkpoint. Disables early stopping so the window is well-defined; reports **both** the best-checkpoint and SWA held-out numbers, and saves the average as `<save>.swa`. Measured **neutral at 6h but −6 km at 48h (4/5 seeds)** — recommended for long-horizon forecasting (FINDINGS §20). | off |
 | `--resume=CKPT` | Resume weights **and optimizer state** from a checkpoint + its `.opt` sidecar. | — |
 | `--motion` | **Feed position + velocity** (lat, lon, Δlat, Δlon) as input features — the trajectory signal the model otherwise never sees. | off |
 | `--physics` | **Second-order physics features**: acceleration (Δ²lat, Δ²lon), translation speed, heading unit vector, and seasonal day-of-year phase (sin/cos). Composes with `--motion` (+7 features). | off |

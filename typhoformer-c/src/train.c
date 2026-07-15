@@ -257,6 +257,7 @@ static int cmd_train(int argc, char **argv) {
      * spatial=0 is the DEFAULT (no N=1 spatial blocks — FINDINGS §7); pass
      * --spatial for the paper-faithful architecture. */
     int spatial = 0, posenc = 0, pool_last = 0, prenorm = 0, timebias = 0, co_spatial = 0;  /* encoder options */
+    int swa = 0, swa_start = 0;       /* Stochastic Weight Averaging: average params over the late-epoch tail */
     uint64_t seed = 20260711, split_seed = 42;   /* weight-init/dropout RNG seed; storm-split RNG seed */
     const char *csv = DEF_CSV, *emb = DEF_EMB, *bin = NULL, *save = DEF_CKPT, *resume = NULL;
     /* Hand-rolled getopt: each arg is either a "--flag" toggle or a
@@ -310,6 +311,8 @@ static int cmd_train(int argc, char **argv) {
         else if (!strcmp(argv[i], "--co_spatial"))     co_spatial = 1;   /* feed co-active storm neighbours */
         else if (!strncmp(argv[i], "--split_seed=", 13)) split_seed = strtoul(argv[i] + 13, NULL, 10);  /* storm split RNG */
         else if (!strncmp(argv[i], "--patience=", 11)) patience = atoi(argv[i] + 11);
+        else if (!strcmp(argv[i], "--swa"))            swa = 1;                          /* SWA on: average the late-epoch tail */
+        else if (!strncmp(argv[i], "--swa_start=", 12)) { swa = 1; swa_start = atoi(argv[i] + 12); }  /* first epoch to average from */
         else if (!strncmp(argv[i], "--seed=", 7))      seed = strtoul(argv[i] + 7, NULL, 10);           /* weight/dropout RNG */
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') epochs = atoi(argv[i]);       /* bare number => epoch count */
     }
@@ -452,6 +455,17 @@ static int cmd_train(int argc, char **argv) {
      * since_improve counts consecutive non-improving epochs for early stopping. */
     double best = 1e300; int best_ep = 0, since_improve = 0; Eval best_e = e0;
     long gstep = 0; float decay_mult = 1.0f;         /* LR schedule state: global optimizer step count, per-epoch decay factor */
+    /* SWA state: a running SUM of the flat parameter vector over every epoch from
+     * `swa_from` onward; divided by `swa_count` at the end to form the average.
+     * The val landscape is flat and training is chaotic (FINDINGS §15), the setting
+     * where averaging the tail finds a wider, better-generalizing point than any
+     * single epoch. Default window = the second half of training. Early stopping is
+     * disabled under --swa so the window is well-defined. No BatchNorm here (LayerNorm
+     * computes its stats per-forward), so averaging the weights needs no stat refresh. */
+    long nparams = plist_num_params(&pl);
+    int swa_from = swa ? (swa_start > 0 ? swa_start : epochs / 2 + 1) : 0;
+    float *swa_buf = swa ? (float *)calloc((size_t)nparams, sizeof(float)) : NULL;
+    long swa_count = 0;
     for (int ep = start_ep + 1; ep <= epochs; ++ep) {
         /* Fisher–Yates shuffle of the train index array: for i from n-1 down to
          * 1, swap element i with a uniformly-random j in [0,i]. Gives an unbiased
@@ -531,10 +545,20 @@ static int cmd_train(int argc, char **argv) {
             checkpoint_save4(save, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, modes, &pl);
             char opath[1024]; snprintf(opath, sizeof opath, "%s.opt", save);
             checkpoint_save_optim(opath, &opt, ep);  /* sidecar for --resume: Adam moments + this epoch number */
-        } else if (++since_improve >= patience && patience > 0) {
+        } else if (++since_improve >= patience && patience > 0 && !swa) {
             /* Early stopping: bail once val ΔR has failed to improve for
-             * `patience` consecutive epochs (only when patience>0). */
+             * `patience` consecutive epochs (only when patience>0). Disabled under
+             * --swa: the averaging window needs the full epoch budget to be defined. */
             printf("early stop: no val improvement for %d epochs\n", patience); break;
+        }
+        /* SWA: accumulate this epoch's (post-update) weights once we reach the window.
+         * Flat traversal in ParamList order matches checkpoint layout and is stable
+         * across epochs (same model), so index j,e addresses the same weight each time. */
+        if (swa && ep >= swa_from) {
+            long idx = 0;
+            for (int j = 0; j < pl.count; ++j)
+                for (int e2 = 0; e2 < pl.item[j].n; ++e2) swa_buf[idx++] += pl.item[j].v[e2];
+            ++swa_count;
         }
         decay_mult *= lr_decay;                       /* per-epoch LR decay (1.0 = off) */
     }
@@ -555,7 +579,26 @@ static int cmd_train(int argc, char **argv) {
         printf("HELD-OUT TEST: dR %.2f km | MAE %.4f  (persistence %.2f km) over %d samples\n",
                te.mkm, te.mmae, te.mbase, nte);
         print_horizons(&te);
+
+        /* SWA generalization estimate: load the tail-averaged weights over the SAME
+         * held-out test and report alongside the best checkpoint — a clean per-run
+         * A/B (identical training, two weight sets). Averaging replaces the live
+         * params; training is done, so that is fine. Also persist as `<save>.swa`. */
+        if (swa && swa_count > 0) {
+            long idx = 0;
+            for (int j = 0; j < pl.count; ++j)
+                for (int e2 = 0; e2 < pl.item[j].n; ++e2) pl.item[j].v[e2] = swa_buf[idx++] / (float)swa_count;
+            Eval se = evaluate(&m, &pl, pt, &ds, test, nte);
+            printf("SWA HELD-OUT TEST: dR %.2f km | MAE %.4f  (avg of %ld epochs from ep %d) over %d samples\n",
+                   se.mkm, se.mmae, swa_count, swa_from, nte);
+            print_horizons(&se);
+            char sp_swa[1024]; snprintf(sp_swa, sizeof sp_swa, "%s.swa", save);
+            checkpoint_save4(sp_swa, c, ds.mean, ds.std, ds.d_num, ds.cmean, ds.cstd, modes, &pl);
+        } else if (swa) {
+            printf("SWA: window empty (window starts at ep %d, only %d epochs ran) — SWA skipped\n", swa_from, epochs);
+        }
     }
+    free(swa_buf);
 
     /* Tear everything down in reverse order of allocation (scratch tensors,
      * worker pool, split arrays, optimizer, model, param list, dataset). */
