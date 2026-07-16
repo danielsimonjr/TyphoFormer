@@ -1177,6 +1177,42 @@ ship a 24–73% ΔR regression. If calibrated uncertainty is wanted later, the r
 *separately-trained* variance model over the frozen point forecast's residuals (a second
 pass, outside `model_loss`) — not a coupled NLL.
 
+## 24. IBTrACS West Pacific — the model finally sees a typhoon, and helps more
+
+Roadmap Item 7, and the first *data* win. §3 measured data as the accuracy ceiling and
+every section since has confirmed it: the levers that moved this model were storms
+(98 → 826) and physics features, never architecture. But there was an elephant in the
+room — **TyphoFormer is a typhoon model trained on the wrong ocean.** HURDAT2 covers the
+Atlantic and East/Central Pacific only; the West Pacific, the basin that actually produces
+*typhoons*, was absent. IBTrACS — NOAA's WMO-blessed *global* best-track archive — fixes
+that. `tools/ibtracs_to_csv.py` + `tools/fetch_ibtracs.sh` download and convert any basin
+into the repo's CSV schema, handling two IBTrACS specifics: it mixes 3- and 6-hourly (and
+off-synoptic) records — kept only the synoptic 00/06/12/18 UTC steps so the 6-hourly window
+is uniform — and carries "spur" sub-tracks (`--track=main` keeps the primary trajectory).
+
+The West Pacific file yields **1,446 storms (52,735 synoptic records, since 1980) — 1.75×
+the 826-storm HURDAT set**, and every one an actual typhoon. Recipe (`--direct`), five
+seeds, held-out test, vs the split-matched constant-velocity (CLIPER) baseline:
+
+| basin | dataset | `--direct` 6–48h mean | CLIPER 6–48h | margin |
+|:--|:--|:--:|:--:|:--:|
+| Atlantic (§22) | HURDAT, 826 storms | 217.8 | 235.0 | −17.2 (−7.3%) |
+| **West Pacific** | IBTrACS WP, 1446 storms | **233.0 ± 4.0** | 262.9 | **−29.9 (−11.4%)** |
+
+The recipe beats CLIPER on **5/5 WPac seeds** with tight spread (± 4.0 km), and — the point
+— **by a wider relative margin than on the Atlantic** (11.4% vs 7.3%). Absolute ΔR is not
+comparable across basins (different storm populations, different CLIPER bars — the §15
+caveat), but the split-matched margin *is*, and it is larger where the storms recurve more:
+West Pacific dead reckoning at 48h is 551 km (vs the Atlantic's ~483), so the learned
+curvature has more to correct and earns more. **The model helps most exactly where
+forecasting is hardest, on the basin it is named for.**
+
+No model change — this is pure data reach: a converter, a fetch script, and the committed
+`IBTRACS_WP.csv` so the result reproduces without a 109 MB download. The obvious next steps
+are the other basins (`fetch_ibtracs.sh EP|NA|NI|SI|SP`) and a single global model, and then
+the real physics lever, §8's environmental steering flow (ERA5) — the one input this model
+has never had and the one the forecasters actually use.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above

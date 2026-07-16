@@ -49,8 +49,12 @@ cost hours, and it isn't already stated somewhere better.
   (§22) — the direct head subsumes it. (6) NLL/uncertainty head — **REFUTED, reverted (§23):**
   built + gradient-checked a heteroscedastic Gaussian NLL, but it regresses the mean at every
   horizon (+73% @ 6h, +24% @ 48h, 0/10) — the model inflates variance to abandon hard samples;
-  the detached fix breaks the FD gradient-check. Next: the data/physics levers (Items 7–8, need
-  external data — IBTrACS download, ERA5 CDS key; feasibility TBD in this environment).
+  the detached fix breaks the FD gradient-check. (7) **IBTrACS West Pacific — SHIPPED, the first
+  DATA win (§24):** `ibtracs_to_csv.py` + `fetch_ibtracs.sh` (network IS reachable here — NOAA
+  200s; synoptic-time + spur-track handling); committed `IBTRACS_WP.csv` (**1,446 WPac storms,
+  1.75× HURDAT**). Recipe beats CLIPER on WPac by **−11.4% over 6–48h (5/5)** — wider than the
+  Atlantic's −7.3%; the model helps more on the basin it's named for. Confirms §3 (data is the
+  ceiling). Last: Item 8 (ERA5 steering) — needs a Copernicus CDS API key (Daniel's credential).
 
 ---
 
