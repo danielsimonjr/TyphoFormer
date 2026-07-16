@@ -86,10 +86,13 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       The detached-variance fix breaks the FD gradient-check invariant, so the only FD-consistent
       NLL is the coupled one — and it eats the mean. Calibrated uncertainty, if wanted, needs a
       separate variance model over frozen residuals (a 2nd pass), not a coupled loss.
-- [ ] **7. Global basins via IBTrACS, esp. West Pacific (accuracy · HARD · data).** §3
-      proved data is the ceiling; IBTrACS is 3–5× HURDAT2, and WPac is the *actual*
-      typhoon basin (this is a typhoon model on Atlantic data). New converter analogous
-      to `hurdat2_to_csv.py`. Biggest data lever.
+- [x] **7. Global basins via IBTrACS, esp. West Pacific (accuracy · HARD · data).** **Done —
+      SHIPPED, the first data win (FINDINGS §24).** Built `ibtracs_to_csv.py` (synoptic-time +
+      spur-track handling) + `fetch_ibtracs.sh`; committed `IBTRACS_WP.csv` (**1,446 WPac storms,
+      1.75× HURDAT**). The recipe (`--direct`) beats split-matched CLIPER on West Pacific by
+      **−11.4% over 6–48h (5/5 seeds)** — a *wider* margin than the Atlantic's −7.3%: the model
+      helps more where storms recurve more, on the basin it's named for. Confirms §3 (data is the
+      ceiling). ⏭ other basins + a global model are one `fetch_ibtracs.sh <BASIN>` away.
 - [ ] **8. Environmental steering predictors from ERA5 (accuracy · HARDEST · data + physics).**
       The physical gap: track is governed by steering flow the model can't see. Add coarse
       500 hPa geopotential/deep-layer wind, SST, shear at the storm location (SHIPS/CLIPER

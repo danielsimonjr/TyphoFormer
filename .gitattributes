@@ -11,5 +11,6 @@
 hurdat2_atl.txt   -text
 hurdat2_epac.txt  -text
 HURDAT_full.csv   -text
+IBTRACS_WP.csv    -text
 HURDAT_atl.csv    -text
 HURDAT_epac.csv   -text
