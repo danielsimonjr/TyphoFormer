@@ -45,8 +45,12 @@ cost hours, and it isn't already stated somewhere better.
   6h (32.1 vs 35.2 — **ties CLIPER**, erasing the "loses at 6h" caveat) AND 48h (−10.2 km
   6–48h mean, **5/5 seeds**, ~4.8σ), tighter variance, faster. Refuted my prediction that
   the AR evolving-velocity recurrence would win. **Strong candidate to replace `--cv` as
-  the default decoder — ADR, needs Daniel's OK.** Next: uncertainty head (Item 6), then
-  the data/physics levers (7–8, need external data). ⏭ does `--direct` stack with `--swa`?
+  the default decoder — now DONE, promoted (2026-07-15).** SWA does NOT stack with `--direct`
+  (§22) — the direct head subsumes it. (6) NLL/uncertainty head — **REFUTED, reverted (§23):**
+  built + gradient-checked a heteroscedastic Gaussian NLL, but it regresses the mean at every
+  horizon (+73% @ 6h, +24% @ 48h, 0/10) — the model inflates variance to abandon hard samples;
+  the detached fix breaks the FD gradient-check. Next: the data/physics levers (Items 7–8, need
+  external data — IBTrACS download, ERA5 CDS key; feasibility TBD in this environment).
 
 ---
 
