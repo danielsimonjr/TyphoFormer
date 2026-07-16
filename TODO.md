@@ -78,9 +78,14 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       that helps — removes rollout error compounding rather than adding capacity. Gradient-
       checked. **Candidate to replace `--cv` as the default decoder (ADR — surfaced to Daniel).**
       ⏭ open: does it stack with SWA (§20)?
-- [ ] **6. Probabilistic / NLL uncertainty head (accuracy · HARD).** TC forecasting is
-      the cone, not a point. Heteroscedastic/NLL head outputs calibrated uncertainty;
-      NLL often sharpens the point forecast too. Extends the §13 seed-ensemble work.
+- [x] **6. Probabilistic / NLL uncertainty head (accuracy · HARD).** **Done — REFUTED,
+      reverted (FINDINGS §23).** Built + gradient-checked a heteroscedastic Gaussian NLL head
+      on the direct decoder (per-horizon log-variance channel, race-free). It **regresses the
+      mean at every horizon** — +73% @ 6h, +24% @ 48h, 0/10 seed-horizons, some seeds collapse.
+      Mechanism: `∂loss/∂r = r·e^{−lv}` lets the model inflate variance to abandon hard samples.
+      The detached-variance fix breaks the FD gradient-check invariant, so the only FD-consistent
+      NLL is the coupled one — and it eats the mean. Calibrated uncertainty, if wanted, needs a
+      separate variance model over frozen residuals (a 2nd pass), not a coupled loss.
 - [ ] **7. Global basins via IBTrACS, esp. West Pacific (accuracy · HARD · data).** §3
       proved data is the ceiling; IBTrACS is 3–5× HURDAT2, and WPac is the *actual*
       typhoon basin (this is a typhoon model on Atlantic data). New converter analogous

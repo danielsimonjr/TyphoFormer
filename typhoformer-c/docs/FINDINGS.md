@@ -1131,6 +1131,52 @@ so averaging its tail pulls it *off* its near-optimal checkpoint: `--direct` 217
 one, and it beats every combination (`--cv` 227.9, `--cv --swa` 221.0, `--direct --swa`
 222.1, **`--direct` 217.8**). The recommended recipe is `--direct` *without* `--swa`.
 
+## 23. The uncertainty head — a correct implementation of a loss that eats the mean
+
+Roadmap Item 6. TC forecasting is a cone, not a point, so the natural next step is a
+**heteroscedastic Gaussian NLL**: give the direct head a second output — a per-horizon,
+per-axis log-variance `lv` — and score it by `0.5·(r²·e^{−lv} + lv)` instead of `r²`. The
+model would then emit a calibrated uncertainty cone *and*, in principle, a *learned* robust
+loss (down-weight what it knows is hard), strictly more than Huber's fixed transition.
+
+It was built properly: the direct head's `fc2` widened to emit `[mean corrections |
+log-variances]`, the NLL term and its two gradients (`∂/∂r = r·e^{−lv}`, `∂/∂lv =
+0.5·(1 − r²·e^{−lv})`) added to `model_loss`, threaded through the loss *arguments* (not a
+module global) so each data-parallel worker owns its own variance buffer — race-free. It
+**gradient-checks** (`direct+nll` and `direct+nll+multistep` FD-pass) and is golden-neutral
+when off.
+
+**And it wrecks the mean track — at every horizon.** Recipe direct head (Huber) vs
+`--direct --nll`, 5 seeds:
+
+| horizon | direct (Huber) | direct + NLL | paired Δ | NLL wins |
+|:--|:--:|:--:|:--:|:--:|
+| 6h (`--pred_len=1`) | 32.1 ± 0.9 | 55.6 ± 31.5 | **−23.5** | 0/5 |
+| 6–48h mean (`--pred_len=8`) | 217.8 ± 8.7 | 270.9 ± 37.9 | **−53.1** | 0/5 |
+
+**0 of 10 seed-horizons improved**, +73% at 6h and +24% at 48h, and the variance across
+seeds explodes (one seed collapses to 118 km at 6h). This is the textbook NLL failure,
+measured: the coupling `∂loss/∂r = r·e^{−lv}` lets the model **buy likelihood by inflating
+`lv`** — declaring a hard sample "uncertain" shrinks its gradient, so the optimizer stops
+fitting it. The residual and the variance chase each other into a corner where the mean is
+abandoned. The predicted σ is therefore not even trustworthy (it is inflated to excuse a
+bad mean), so the uncertainty it buys is worth little.
+
+**The standard fix does not survive this codebase.** The cure is a *detached* variance head:
+train the mean by Huber and the variance by NLL on the **stop-gradient** residual, so the
+variance never pulls on the mean. But a stop-gradient makes the reported loss and the
+analytic gradient inconsistent — the finite-difference gradient check (this repo's core
+correctness invariant, §"correctness discipline") would see the variance term move with the
+mean while `dpred` does not, and fail. The only FD-consistent NLL is the coupled one, and
+the coupled one eats the mean.
+
+**Verdict: refuted, reverted** (like §19, not §21 — this is new code with a large measured
+regression and no clean fix, not the repair of an existing flag). Recorded with the
+mechanism so the next person does not re-derive a uncertainty head from the textbook and
+ship a 24–73% ΔR regression. If calibrated uncertainty is wanted later, the route is a
+*separately-trained* variance model over the frozen point forecast's residuals (a second
+pass, outside `model_loss`) — not a coupled NLL.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above
