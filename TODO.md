@@ -93,11 +93,17 @@ implement or refute → gradient-check → FINDINGS/CHANGELOG → PR. Negatives 
       **−11.4% over 6–48h (5/5 seeds)** — a *wider* margin than the Atlantic's −7.3%: the model
       helps more where storms recurve more, on the basin it's named for. Confirms §3 (data is the
       ceiling). ⏭ other basins + a global model are one `fetch_ibtracs.sh <BASIN>` away.
-- [ ] **8. Environmental steering predictors from ERA5 (accuracy · HARDEST · data + physics).**
-      The physical gap: track is governed by steering flow the model can't see. Add coarse
-      500 hPa geopotential/deep-layer wind, SST, shear at the storm location (SHIPS/CLIPER
-      tradition). Data engineering (ERA5 fetch + interpolation). **Highest-leverage accuracy
-      move on the board** — deliberately last because it is the most infrastructure.
+- [~] **8. Environmental steering predictors from ERA5 (accuracy · HARDEST · data + physics).**
+      **PREMISE VALIDATED + data path proven; full feature NOT yet built (FINDINGS §25).** The
+      physical gap: track is governed by steering flow the model can't see. Proof-of-concept
+      (`tools/era5_steering_poc.py`) collocated 500 hPa ERA5 wind with HURDAT points →
+      **corr(u,Δlon)=+0.63, corr(v,Δlat)=+0.91** — the steering flow predicts the motion.
+      Data reachable with **no credential wall** (public ARCO-ERA5, anon; zarr stack on Windows
+      Python — WSL Python has no pip). ⏭ REMAINING (a real multi-hour build): (1) efficient
+      collocation batched by timestamp (naive ~27 s/point → days for ~16k points); (2) leakage-
+      safe CSV columns for deep-layer (u,v)[+shear]; (3) `data.c` loader extension + `--steering`
+      flag; (4) retrain + measure held-out ΔR (expected largest at long horizons). Coverage caveat:
+      ARCO ends 2021, HURDAT runs to 2025 → restrict to ≤2021 or add a later ERA5 source.
 
 > **Deliberately NOT on the list:** more work on the language branch. The GPT-4o text is
 > generated *from* the track numbers, so it is largely redundant — which is why `--no_text`
