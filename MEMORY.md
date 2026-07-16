@@ -54,7 +54,13 @@ cost hours, and it isn't already stated somewhere better.
   200s; synoptic-time + spur-track handling); committed `IBTRACS_WP.csv` (**1,446 WPac storms,
   1.75× HURDAT**). Recipe beats CLIPER on WPac by **−11.4% over 6–48h (5/5)** — wider than the
   Atlantic's −7.3%; the model helps more on the basin it's named for. Confirms §3 (data is the
-  ceiling). Last: Item 8 (ERA5 steering) — needs a Copernicus CDS API key (Daniel's credential).
+  ceiling). (8) ERA5 steering — **PREMISE VALIDATED, full feature NOT built (§25).** No CDS
+  credential wall after all: **public ARCO-ERA5** (`gs://gcp-public-data-arco-era5`, anon) has
+  u/v on 37 levels, 1959–2021; zarr stack installs on **Windows Python** (WSL python has no pip,
+  `sudo apt` needs a password). POC (`tools/era5_steering_poc.py`) measured **corr(u,Δlon)=+0.63,
+  corr(v,Δlat)=+0.91** — steering predicts motion. ⏭ remaining: batched collocation (~27 s/point
+  naive → days for 16k pts), CSV columns, `data.c` + `--steering` flag, retrain. **The one big
+  open item — highest leverage, real multi-hour build, starts from a proven data path.**
 
 ---
 

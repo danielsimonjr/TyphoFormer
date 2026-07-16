@@ -1213,6 +1213,45 @@ are the other basins (`fetch_ibtracs.sh EP|NA|NI|SI|SP`) and a single global mod
 the real physics lever, §8's environmental steering flow (ERA5) — the one input this model
 has never had and the one the forecasters actually use.
 
+## 25. ERA5 steering — the premise is real and reachable; the full build is scoped
+
+Roadmap Item 8, the hardest and highest-leverage lever, and the one input the operational
+forecasters actually use that this model has never had: the **environmental steering flow**.
+A tropical cyclone is largely advected by the deep-layer mean wind; TyphoFormer sees only
+position, velocity, intensity and text, so the atmosphere that *moves* the storm is invisible
+to it. This section records what was established — the physics premise and the data path — and
+what the full feature is, honestly, still short of.
+
+**The data is reachable with no credential wall.** ERA5 normally needs a Copernicus CDS API
+key, but Google's public **ARCO-ERA5** mirror (`gs://gcp-public-data-arco-era5/...`, anonymous)
+opens without one. It carries `u/v_component_of_wind` on all 37 pressure levels (500/850/200
+hPa for a deep-layer mean), 1959→2021. (A coverage caveat: HURDAT runs to 2025, so 2022+ storms
+fall outside ARCO — restrict to ≤2021 or add a later ERA5 source.) The zarr stack does not
+install under the stripped WSL Python (`sudo apt` needs a password), but it installs cleanly on
+the machine's Windows Python — the collocation is a Python *preprocessing* step, so that is fine.
+
+**The premise holds — measured.** Collocating the 500 hPa wind at HURDAT track points against
+each storm's observed next-6h motion:
+
+| correlation | value |
+|:--|:--:|
+| 500 hPa zonal wind `u` vs Δlon | **+0.63** |
+| 500 hPa meridional wind `v` vs Δlat | **+0.91** |
+
+Both strongly positive and physically sensible (a point under +14/+16 m/s SW-erly steering moved
+NE by +2.0°/+1.9°). The steering flow predicts the motion the model is trying to learn from
+coordinates alone. This is the strongest a-priori case any lever in this roadmap has had — data
+and physics, the two things §3–§24 show actually move the model, in one feature.
+
+**What is left, and the wall.** The full feature is a real multi-part build, not yet done:
+(1) *efficient* collocation — ARCO's 1-hourly chunks are ~150 MB, so a naive point read costs
+~27 s; the 826-storm set (~16 k points) must batch reads by timestamp, or the job runs for days;
+(2) a leakage-safe Python step that writes the deep-layer `(u,v)` (and maybe shear) as extra CSV
+columns; (3) a `data.c` loader extension + a `--steering` flag to feed them as input features,
+alongside `--motion`/`--physics`; (4) retrain and measure the held-out ΔR uplift, expected
+largest at long horizons where steering dominates. Scoped and de-risked here so the next session
+starts from a proven data path and a validated premise, not from zero.
+
 ## Reproduce
 
 The commands below record the exact protocol used for the numbers above
